@@ -2225,7 +2225,7 @@ public class DBApp implements DBAppInterface, Serializable {
 			System.out.println("ana page");
 		}
 
-		System.out.println("************************************************************************************************8");
+	//	System.out.println("************************************************************************************************8");
 
 		dbApp.deleteFromTable("students", toBeDeleted);
 
