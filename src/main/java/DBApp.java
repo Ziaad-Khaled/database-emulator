@@ -563,13 +563,13 @@ public class DBApp implements DBAppInterface, Serializable {
 		for(int i=0;i<table.indices.size();i++)
 		{
 			Object[] grid = table.indices.get(i);
+			Object[] pointer = grid;
 			Vector<String> gridColNames = table.indicesColNames.get(i);
 			for(int j=0;j<gridColNames.size();j++) // [id,name]
 			{
-				Object[] pointer = grid;
 				Object value = tuple.data.get(gridColNames.get(j));
 				int indexOfRange = table.getIndexOfGrid(value,table.ranges.get(gridColNames.get(j)));
-				if(i==gridColNames.size()-1)
+				if(j==gridColNames.size()-1)
 				{
 					Vector<Vector<String>> vectorOfBucket = deserializeBucket((String)(pointer[indexOfRange]));
 					boolean pageFound  = false;
@@ -781,48 +781,218 @@ public class DBApp implements DBAppInterface, Serializable {
 		{
 			throw new DBAppException("Invalid Tuple");
 		}
-		int pageIndex = searchForPage(table, tuple);
-		Vector<Tuple> page;
-		int indexInPage;
-		if (pageIndex == -1 || pageIndex == table.pagesPath.size()){
-			System.out.println("This primary key is not present in the table");
-			return;
+
+		Object[] grid = null;
+		int dimension = 0;
+		for(int i = 0 ; i < table.indices.size() ; i++){
+			if(table.indicesColNames.get(i).get(0).equals(table.clusteringKey)){
+				grid = table.indices.get(i);
+				dimension = table.indicesColNames.get(i).size();
+			}
+			if(table.indicesColNames.get(i).size() == 1 && table.indicesColNames.get(i).get(0).equals(table.clusteringKey))
+			{
+				dimension = 1;
+				break;
+			}
 		}
 
-		String pagePath = table.pagesPath.get(pageIndex);
-		page = deserialize(pagePath);
+		String clusteringKeyMin = "", clusteringKeyMax = "", clusteringKeyType = "";
+		try {
+			File myObj = new File("src/main/resources/metadata.csv");
+			Scanner myReader = new Scanner(myObj);
+			myReader.nextLine();
+			while (myReader.hasNextLine()) {
+				String line = myReader.nextLine();
+				String[] arr = line.split(",");
+				if (!arr[0].equals(tableName))
+					continue;
+				if(arr[1].equals(table.clusteringKey)){
+					clusteringKeyMin = arr[5];
+					clusteringKeyMax = arr[6];
+					clusteringKeyType = arr[2];
+				}
+			}
+			myReader.close();
+		} catch (FileNotFoundException e) {
+			System.out.println("An error occurred.");
+			e.printStackTrace();
+		}
 
-		indexInPage = searchInPage(page, tuple);
-		
-		if (indexInPage == -1)
+		if(grid != null) {
+			Pair[] ranges = Table.getRanges(clusteringKeyMin, clusteringKeyMax, clusteringKeyType);
+			int index = Table.getIndexOfGrid(tuple.data.get(tuple.clusteringKey), ranges);
+
+			String pagePath = "";
+			if (dimension == 1) {
+				String bucketPath = (String) grid[index];
+				pagePath = searchBucket(bucketPath, tuple, table);
+			}
+			if(pagePath.equals(""))
+			{
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
+			else
+			{
+				Vector<Tuple> page = deserialize(pagePath);
+				int indexInPage = searchInPage(page,tuple);
+				if(indexInPage==-1)
+				{
+					System.out.println("This primary key is not present in the table");
+				}
+				else
+				{
+					Tuple updatedTuple = page.get(indexInPage);
+					//milestone 2
+					//-------
+					page.remove(indexInPage);
+					serialize(pagePath,page);
+					indexAfterDeletion(pagePath,updatedTuple,table,page);
+					page.insertElementAt(updatedTuple,indexInPage);
+					//-------
+					Set<String> setOfColumns = columnNameValue.keySet();
+					for (String key: setOfColumns) {
+						//DO we need to check the validity of updated tuple??????
+						updatedTuple.data.put(key,columnNameValue.get(key));
+					}
+					serialize(pagePath, page);
+					// milestone 2
+					indexAfterInserting(pagePath,updatedTuple,table);
+				}
+			}
+		}
+		else
 		{
-			System.out.println("This primary key is not present in the table");
-			return;
+			int pageIndex = searchForPage(table, tuple);
+			Vector<Tuple> page;
+			int indexInPage;
+			if (pageIndex == -1 || pageIndex == table.pagesPath.size()){
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
+
+			String pagePath = table.pagesPath.get(pageIndex);
+			page = deserialize(pagePath);
+
+			indexInPage = searchInPage(page, tuple);
+
+			if (indexInPage == -1)
+			{
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
+
+
+			if (tuple.compareTo(page.get(indexInPage)) != 0)
+			{
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
+
+			Tuple updatedTuple = page.get(indexInPage);
+			//milestone 2
+			//-------
+			page.remove(indexInPage);
+			serialize(pagePath,page);
+			indexAfterDeletion(pagePath,updatedTuple,table,page);
+			page.insertElementAt(updatedTuple,indexInPage);
+			//-------
+			Set<String> setOfColumns = columnNameValue.keySet();
+			for (String key: setOfColumns) {
+				//DO we need to check the validity of updated tuple??????
+				updatedTuple.data.put(key,columnNameValue.get(key));
+			}
+			serialize(table.pagesPath.get(pageIndex), page);
+			// milestone 2
+			indexAfterInserting(pagePath,updatedTuple,table);
 		}
 
-		
-		if (tuple.compareTo(page.get(indexInPage)) != 0)
+	}
+
+
+
+	public String searchBucket(String bucketPath, Tuple tuple, Table table) {
+		Vector<Tuple> firstPage = deserialize(table.pagesPath.get(0));
+		Vector<Tuple> lastPage = deserialize(table.pagesPath.get(table.pagesPath.size()-1));
+		Object minValueInTable = firstPage.get(0).data.get(table.clusteringKey);
+		Object maxValueInTable = lastPage.get(lastPage.size()-1).data.get(table.clusteringKey);
+		Object value = tuple.data.get(tuple.clusteringKey);
+		if(comparison(value, minValueInTable) < 0)
+			return table.pagesPath.get(0);
+		if(comparison(value, maxValueInTable) > 0)
+			return table.pagesPath.get(table.pagesPath.size()-1);
+		Object maxBeforeValue = null;
+		Object minAfterValue = null;
+		String maxBeforeValuePath = "";
+		String minAfterValuePath = "";
+
+		Vector<Vector<String>> buckets = deserializeBucket(bucketPath);
+
+
+		for(int i = 0 ; i < buckets.size() ; i++)
 		{
-			System.out.println("This primary key is not present in the table");
-			return;
+			//if(buckets.get(i).size() == 0)
+				for(int j = 0 ; j < buckets.get(i).size() ; j++)
+				{
+					//System.out.println(buckets.get(i).size());
+					Vector<Tuple> page = deserialize(buckets.get(i).get(j));
+					String pagePath = buckets.get(i).get(j);
+					for(int k = 0 ; k < page.size() ; k++)
+					{
+						Tuple tupleInHand = page.get(k);
+						Object valueOfTuple = tupleInHand.data.get(tupleInHand.clusteringKey);
+
+						//el tuple howa ely f eedy
+						if(comparison(valueOfTuple, value) == 0){
+
+							return pagePath;
+						}
+
+
+						//el tuple as8ar mn ely f eedy
+						//System.out.println(valueOfTuple + " " + value + " ff");
+						//System.out.println(valueOfTuple + " " + maxBeforeValue + "gg");
+						if(maxBeforeValue != null)
+							System.out.println(comparison(valueOfTuple, maxBeforeValue) > 0);
+						if(comparison(valueOfTuple, value) < 0)
+						{
+
+							if(maxBeforeValue == null){
+								maxBeforeValue = valueOfTuple;
+								maxBeforeValuePath = pagePath;
+
+							}
+
+							else if(comparison(valueOfTuple, maxBeforeValue) > 0)
+							{
+								maxBeforeValue = valueOfTuple;
+								maxBeforeValuePath = pagePath;
+							}
+						}
+
+						//el tuple akbar mn ely f eedy
+						else
+						{
+							if(minAfterValue == null)
+							{
+
+								minAfterValue = valueOfTuple;
+								minAfterValuePath = pagePath;
+							}
+							else if(comparison(valueOfTuple, minAfterValue) < 0){
+								minAfterValue = valueOfTuple;
+								minAfterValuePath = pagePath;
+							}
+						}
+					}
+				}
+
 		}
 
-		Tuple updatedTuple = page.get(indexInPage);
-		//milestone 2
-		//-------
-		page.remove(indexInPage);
-		serialize(pagePath,page);
-		indexAfterDeletion(pagePath,updatedTuple,table,page);
-		page.insertElementAt(updatedTuple,indexInPage);
-		//-------
-		Set<String> setOfColumns = columnNameValue.keySet();
-		for (String key: setOfColumns) {
-			//DO we need to check the validity of updated tuple??????
-			updatedTuple.data.put(key,columnNameValue.get(key));
-		}
-		serialize(table.pagesPath.get(pageIndex), page);
-		//milestone 2
-		indexAfterInserting(pagePath,updatedTuple,table);
+//		System.out.println(table);
+//		System.out.println(maxBeforeValuePath + " dkdk");
+//		System.out.println(tuple);
+		return maxBeforeValuePath;
 	}
 
 	@Override
@@ -835,18 +1005,91 @@ public class DBApp implements DBAppInterface, Serializable {
 		// first case: the primary key exists so we will search by the primary key ( binary search)  and we will get the only one value and we will delete it
 		if(columnNameValue.get(table.clusteringKey)!= null)
 		{
-
 			Tuple tuple = new Tuple();
 			tuple.clusteringKey=table.clusteringKey;
-			Vector<Tuple> page;
 			tuple.data.put(table.clusteringKey, columnNameValue.get(table.clusteringKey)); // adding the value of the primary key to the tuple
+			Object[] grid = null;
+			int dimension = 0;
+			for(int i = 0 ; i < table.indices.size() ; i++){
+				if(table.indicesColNames.get(i).get(0).equals(table.clusteringKey)){
+					grid = table.indices.get(i);
+					dimension = table.indicesColNames.get(i).size();
+				}
+				if(table.indicesColNames.get(i).size() == 1 && table.indicesColNames.get(i).get(0).equals(table.clusteringKey))
+				{
+					dimension = 1;
+					break;
+				}
+			}
+
+			String clusteringKeyMin = "", clusteringKeyMax = "", clusteringKeyType = "";
+			try {
+				File myObj = new File("src/main/resources/metadata.csv");
+				Scanner myReader = new Scanner(myObj);
+				myReader.nextLine();
+				while (myReader.hasNextLine()) {
+					String line = myReader.nextLine();
+					String[] arr = line.split(",");
+					if (!arr[0].equals(tableName))
+						continue;
+					if(arr[1].equals(table.clusteringKey)){
+						clusteringKeyMin = arr[5];
+						clusteringKeyMax = arr[6];
+						clusteringKeyType = arr[2];
+					}
+				}
+				myReader.close();
+			} catch (FileNotFoundException e) {
+				System.out.println("An error occurred.");
+				e.printStackTrace();
+			}
+
+			if(grid != null) {
+			Pair[] ranges = Table.getRanges(clusteringKeyMin, clusteringKeyMax, clusteringKeyType);
+			int index = Table.getIndexOfGrid(tuple.data.get(tuple.clusteringKey), ranges);
+
+			pagePath = "";
+			if (dimension == 1) {
+				String bucketPath = (String) grid[index];
+				pagePath = searchBucket(bucketPath, tuple, table);
+			}
+			if(pagePath.equals(""))
+			{
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
+			else
+			{
+				Vector<Tuple> page = deserialize(pagePath);
+				int indexInPage = searchInPage(page,tuple);
+				Tuple removedTuple = page.remove(indexInPage);
+				serialize(pagePath, page);
+				indexAfterDeletion(pagePath,removedTuple,table,page);
+				// check if the page is empty to remove it and then deseralize
+				if(page.isEmpty())
+				{
+					table.pagesPath.remove(pagePath);
+					Path path = FileSystems.getDefault().getPath(pagePath); //delete the file from disk
+					try {
+						Files.delete(path);
+					} catch (NoSuchFileException x) {
+						System.err.format("%s: no such" + " file or directory%n", path);
+					} catch (IOException x) {
+						System.err.println(x);
+					}
+				}
+			}
+		}
+		else
+		{
+			Vector<Tuple> page;
 			int pageIndex = searchForPage(table, tuple);  // searching for the index
 			pagePath= table.pagesPath.get(pageIndex);
 			page = deserialize(pagePath);
 			int indexInPage = searchInPage(page, tuple);
 
 			// if index is found then delete and run the method to check if the page is empty to delete it / else : return
-		try {
+			try {
 				if (tuple.compareTo(page.get(indexInPage)) == 0) //found
 				{
 					for(String key: columnNameValue.keySet())
@@ -892,6 +1135,9 @@ public class DBApp implements DBAppInterface, Serializable {
 				throw new DBAppException("The column name is invalid");
 			}
 			// not ended yet still we want to check for the tuple values so we need to implement the tuple as a hashtable to enhance the efficiency
+
+		}
+
 		}
 		else // I search by other values (not the primary key)
 		{
@@ -2549,8 +2795,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		maxValues.put("gpa", "5.0");
 
 		dbApp.createTable(tableName, "id", htblColNameType, minValues, maxValues);
-
-
+		Table table = tables.get("students");
 
 		BufferedReader studentsTable = new BufferedReader(new FileReader("src/main/resources/students_table.csv"));
 		String record;
@@ -2580,19 +2825,13 @@ public class DBApp implements DBAppInterface, Serializable {
 			c--;
 		}
 		studentsTable.close();
-		String[] column = new String[2];
+		String[] column = new String[1];
 		column[0]="id";
-		column[1]="gpa";
+//		column[1]="gpa";
 		dbApp.createIndex("students",column);
-		Table table = tables.get("students");
 		Object[] grid = table.indices.get(0);
 //
-//		Vector<Boolean> conditionsSatisfied = new Vector<>();
-//		conditionsSatisfied.add(true);
-//		conditionsSatisfied.add(true);
-//		conditionsSatisfied.add(false);
-//		String[]arrayOperators = {"AND", "OR"};
-//		System.out.println(conditionsResult(conditionsSatisfied, arrayOperators));
+
 
 //		SQLTerm sqlTerm1 = new SQLTerm();
 //		sqlTerm1._strTableName = "students";
@@ -2626,67 +2865,93 @@ public class DBApp implements DBAppInterface, Serializable {
 //		}
 //		System.out.println("Iterator: " + count);
 
-		Hashtable<String, Object> toBeUpdated = new Hashtable<>();
-		toBeUpdated.put("gpa", 1);
 
-
-		for(int i=0;i<10;i++)
-		{
-			Arrays.toString(grid);
-			Object[] secondLayer =  (Object[]) grid[i];
-			for(int j=0; j<10; j++) {
-				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
-				System.out.println(table.ranges.get("id")[i] + " " + table.ranges.get("gpa")[j]);
-				for (int l = 0; l < pagesPath.size(); l++) {
-					for (int k = 0; k < pagesPath.get(l).size(); k++) {
-						System.out.println(deserialize(pagesPath.get(l).get(k)));
-					}
-					System.out.println("/////////////////////");
+		for(int j=0; j<10; j++) {
+			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
+			System.out.println(table.ranges.get("id")[j]);
+			for (int l = 0; l < pagesPath.size(); l++) {
+				for (int k = 0; k < pagesPath.get(l).size(); k++) {
+					System.out.println(deserialize(pagesPath.get(l).get(k)));
 				}
+				System.out.println("/////////////////////");
 			}
 		}
+//		Hashtable<String, Object> toBeUpdated = new Hashtable<>();
+//		toBeUpdated.put("gpa", new Double(0.88));
 
-		for(int i=0;i<table.pagesPath.size();i++)
-		{
-			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-			for(int j=0;j<page.size();j++)
-			{
-				System.out.println(page.get(j));
-			}
-			System.out.println("ana page");
-		}
+		Hashtable<String,Object> toBeDeleted = new Hashtable<>();
+		toBeDeleted.put("id", "82-8772");
 
+
+//		for(int i=0;i<10;i++)
+//		{
+//			Arrays.toString(grid);
+//			Object[] secondLayer =  (Object[]) grid[i];
+//			for(int j=0; j<10; j++) {
+//				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
+//				System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
+//				for (int l = 0; l < pagesPath.size(); l++) {
+//					for (int k = 0; k < pagesPath.get(l).size(); k++) {
+//						System.out.println(deserialize(pagesPath.get(l).get(k)));
+//					}
+//					System.out.println("/////////////////////");
+//				}
+//			}
+//		}
+//
+//		for(int i=0;i<table.pagesPath.size();i++)
+//		{
+//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+//			for(int j=0;j<page.size();j++)
+//			{
+//				System.out.println(page.get(j));
+//			}
+//			System.out.println("ana page");
+//		}
+//
 		System.out.println("************************************************************************************************8");
 
-		dbApp.updateTable("students","82-8772", toBeUpdated);
+//		dbApp.updateTable("students","82-8772", toBeUpdated);
+		dbApp.deleteFromTable("students",toBeDeleted);
 
-		for(int i=0;i<table.pagesPath.size();i++)
-		{
-			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-			for(int j=0;j<page.size();j++)
-			{
-				System.out.println(page.get(j));
-			}
-			System.out.println("ana page");
-		}
-
-
-
-		for(int i=0;i<10;i++)
-		{
-			Arrays.toString(grid);
-			Object[] secondLayer =  (Object[]) grid[i];
-			for(int j=0; j<10; j++) {
-				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
-				System.out.println(table.ranges.get("id")[i] + " " + table.ranges.get("gpa")[j]);
-				for (int l = 0; l < pagesPath.size(); l++) {
-					for (int k = 0; k < pagesPath.get(l).size(); k++) {
-						System.out.println(deserialize(pagesPath.get(l).get(k)));
-					}
-					System.out.println("/////////////////////");
+		for(int j=0; j<10; j++) {
+			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
+			System.out.println(table.ranges.get("id")[j]);
+			for (int l = 0; l < pagesPath.size(); l++) {
+				for (int k = 0; k < pagesPath.get(l).size(); k++) {
+					System.out.println(deserialize(pagesPath.get(l).get(k)));
 				}
+				System.out.println("/////////////////////");
 			}
 		}
+
+//		for(int i=0;i<table.pagesPath.size();i++)
+//		{
+//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+//			for(int j=0;j<page.size();j++)
+//			{
+//				System.out.println(page.get(j));
+//			}
+//			System.out.println("ana page");
+//		}
+//
+//
+//
+//		for(int i=0;i<10;i++)
+//		{
+//			Arrays.toString(grid);
+//			Object[] secondLayer =  (Object[]) grid[i];
+//			for(int j=0; j<10; j++) {
+//				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
+//				System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
+//				for (int l = 0; l < pagesPath.size(); l++) {
+//					for (int k = 0; k < pagesPath.get(l).size(); k++) {
+//						System.out.println(deserialize(pagesPath.get(l).get(k)));
+//					}
+//					System.out.println("/////////////////////");
+//				}
+//			}
+//		}
 	}
 }
 
