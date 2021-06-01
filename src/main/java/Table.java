@@ -108,7 +108,6 @@ public class Table {
 			double rangeStep = (maxDouble-minDouble)/10.0;
 			double x=minDouble;
 			for(int i=0; i<=8; i++){
-				rangeStep = (maxDouble-minDouble)/(10.0-i);
 				ranges[i]=new Pair(x,x+rangeStep);
 				x=x+rangeStep;
 			}
