@@ -1115,387 +1115,541 @@ public class DBApp implements DBAppInterface, Serializable {
 
 	@Override
 	public Iterator <?> selectFromTable(SQLTerm[] sqlTerms, String[] arrayOperators) throws DBAppException {
+		// TODO Auto-generated method stub
 
+		//make sure that sqlTerms not empty
 		if(sqlTerms.length==0)
 			throw new DBAppException("No SQL Terms and no table entered to select from!");
 
 		checkValidInput(sqlTerms,arrayOperators);
+
 		//get the table on which you execute select
 		Table table = tables.get(sqlTerms[0]._strTableName);
 		Vector<Object[]> tableIndicies= table.indices;
 		Vector<Vector<String>> indiciesColNames = table.indicesColNames;
 
-		//Collect all the column names in the select statement
-		Vector<String> sqlColNames = new Vector<>();
-		for(int i=0; i<sqlTerms.length; i++)
-			sqlColNames.add(sqlTerms[i]._strColumnName);//[gpa,age]
+		//Very special case: All of sql terms are on the primary key
+		//All sql terms have or between them
+		//Do not need an index, just do binary searches
 
-		Vector<Tuple> result = new Vector<>();//the final result, tuples that will be in the iterator
-		int maxColumnsMatch = 0; //the maximum number of columns in an index that match with the select statement
-		Object[] maxIndex = null; //the index that has the maximum number of column match with the select
-		Vector<String> maxIndexColumnsNames = null;
-		//iterate over all the column names of the indicies to get the index that has the max columns match
-		for(int i=0; i<indiciesColNames.size(); i++)
+		boolean allPrimary = true;
+		for(int i=0; i<sqlTerms.length; i++)
 		{
-			Vector<String> indexColumnsNames = indiciesColNames.get(i);//[first_name,gpa]
-			int columnsMatch = 0;
-			//iterate on the columns of the select statements to check how many match with this index
-			for(int j=0; j<sqlTerms.length; j++)
+			if(!sqlTerms[i]._strColumnName.equals(table.clusteringKey))
 			{
-				if(indexColumnsNames.contains(sqlColNames.get(j)))
-					columnsMatch++;
-			}
-			if(columnsMatch>maxColumnsMatch)
-			{
-				maxColumnsMatch=columnsMatch;
-				maxIndex=tableIndicies.get(i);
-				maxIndexColumnsNames = indexColumnsNames;
+				allPrimary=false;
+				break;
 			}
 		}
-
-		if(maxIndex==null)//the table had no indicies that have columns matching any of those in the select
+		if(allPrimary)
 		{
-			//select directly from table
-			// first case: the primary key exists so we will search by the primary key ( binary search)  and we will get the only one value and we will select it
-			if(sqlColNames.contains(table.clusteringKey))
+			HashSet<Tuple> resultSpecialCase = new HashSet<>();
+			for(int i=0; i<sqlTerms.length;i++)
 			{
-				boolean existsOR_XOR = false;
-				for(int i=0; i<arrayOperators.length; i++)
-					if(arrayOperators[i].equals("OR") || arrayOperators[i].equals("XOR"))
-					{
-						existsOR_XOR=true;break;
-					}
-				if (!existsOR_XOR) {//do binary search
-					//get the sqlTerm that has the primary key in order to have access to its value
-					SQLTerm primaryKeyCondition = null;
-					for(int i=0; i<sqlTerms.length; i++) {
-						if (sqlTerms[i]._strColumnName.equals(table.clusteringKey)) {
-							primaryKeyCondition=sqlTerms[i];
-							break;
-						}
-					}
-					Tuple tuple = new Tuple();//temporary tuple containing only primary key to search
-					tuple.clusteringKey=table.clusteringKey;
-					Vector<Tuple> pagePrimaryKey;
-					tuple.data.put(table.clusteringKey, primaryKeyCondition._objValue); // adding the value of the primary key to the tuple
-					//search for this tuple
-					int pageIndexInTable = searchForPage(table, tuple);  // searching for the index of the page
-					String pagePrimaryKeyPath= table.pagesPath.get(pageIndexInTable);
-					pagePrimaryKey = deserialize(pagePrimaryKeyPath); //page containing the primary key
-					int indexInPage = searchInPage(pagePrimaryKey, tuple); //the index of the required tuple in the page
-					Tuple primaryKeyTuple = pagePrimaryKey.get(indexInPage);//the tuple containing the primary key
-					//Now, apply condition on only the primary key
-					Object primaryKeyValue = primaryKeyCondition._objValue;
-					//primary key column = table.clusteringkey
+				SQLTerm primaryKeyCondition = sqlTerms[i];
+				Tuple tuple = new Tuple();//temporary tuple containing only primary key to search
+				tuple.clusteringKey=table.clusteringKey;
+				Vector<Tuple> pagePrimaryKey;
+				tuple.data.put(table.clusteringKey, primaryKeyCondition._objValue); // adding the value of the primary key to the tuple
+				//search for this tuple
+				int pageIndexInTable = searchForPage(table, tuple);  // searching for the index of the page
+				String pagePrimaryKeyPath= table.pagesPath.get(pageIndexInTable);
+				pagePrimaryKey = deserialize(pagePrimaryKeyPath); //page containing the primary key
+				int indexInPage = searchInPage(pagePrimaryKey, tuple); //the index of the required tuple in the page
+				Tuple primaryKeyTuple = pagePrimaryKey.get(indexInPage);//the tuple containing the primary key
+				//Now, apply condition on only the primary key
+				Object primaryKeyValue = primaryKeyCondition._objValue;
+				//primary key column = table.clusteringkey
+				loopPrimaryKey(primaryKeyCondition,table,pageIndexInTable,pagePrimaryKey,indexInPage,sqlTerms,resultSpecialCase,primaryKeyTuple);
+				System.out.println(resultSpecialCase);
+			}
+			return resultSpecialCase.iterator();
 
-					switch (primaryKeyCondition._strOperator)
+		}
+		else // Not all of the sql terms are primary
+		{
+			//Collect all the column names in the select statement
+			Vector<String> sqlColNames = new Vector<>();
+			for(int i=0; i<sqlTerms.length; i++)
+				sqlColNames.add(sqlTerms[i]._strColumnName);//[gpa,age]
+
+			HashSet<Tuple> result = new HashSet<>();//the final result, tuples that will be in the iterator
+			int maxColumnsMatch = 0; //the maximum number of columns in an index that match with the select statement
+			Object[] maxIndex = null; //the index that has the maximum number of column match with the select
+			Vector<String> maxIndexColumnsNames = null;
+			//iterate over all the column names of the indicies to get the index that has the max columns match
+			for(int i=0; i<indiciesColNames.size(); i++)
+			{
+				Vector<String> indexColumnsNames = indiciesColNames.get(i);//[first_name,gpa]
+				int columnsMatch = 0;
+				//iterate on the columns of the select statements to check how many match with this index
+				for(int j=0; j<sqlTerms.length; j++)
+				{
+					if(indexColumnsNames.contains(sqlColNames.get(j)))
+						columnsMatch++;
+				}
+				if(columnsMatch>maxColumnsMatch)
+				{
+					maxColumnsMatch=columnsMatch;
+					maxIndex=tableIndicies.get(i);
+					maxIndexColumnsNames = indexColumnsNames;
+				}
+			}
+
+			if(maxIndex==null)//the table had no indicies that have columns matching any of those in the select
+			{
+				//select directly from table
+				// first case: the primary key exists so we will search by the primary key ( binary search)  and we will get the only one value and we will select it
+				if(sqlColNames.contains(table.clusteringKey))
+				{
+					boolean existsOR_XOR = false;
+					for(int i=0; i<arrayOperators.length; i++)
+						if(arrayOperators[i].equals("OR") || arrayOperators[i].equals("XOR"))
+						{
+							existsOR_XOR=true;break;
+						}
+					if (!existsOR_XOR) {//do binary search
+						//get the sqlTerm that has the primary key in order to have access to its value
+						SQLTerm primaryKeyCondition = null;
+						for(int i=0; i<sqlTerms.length; i++) {
+							if (sqlTerms[i]._strColumnName.equals(table.clusteringKey)) {
+								primaryKeyCondition=sqlTerms[i];
+								break;
+							}
+						}
+						Tuple tuple = new Tuple();//temporary tuple containing only primary key to search
+						tuple.clusteringKey=table.clusteringKey;
+						Vector<Tuple> pagePrimaryKey;
+						tuple.data.put(table.clusteringKey, primaryKeyCondition._objValue); // adding the value of the primary key to the tuple
+						//search for this tuple
+						int pageIndexInTable = searchForPage(table, tuple);  // searching for the index of the page
+						String pagePrimaryKeyPath= table.pagesPath.get(pageIndexInTable);
+						pagePrimaryKey = deserialize(pagePrimaryKeyPath); //page containing the primary key
+						int indexInPage = searchInPage(pagePrimaryKey, tuple); //the index of the required tuple in the page
+						Tuple primaryKeyTuple = pagePrimaryKey.get(indexInPage);//the tuple containing the primary key
+						//Now, apply condition on only the primary key
+						Object primaryKeyValue = primaryKeyCondition._objValue;
+						//primary key column = table.clusteringkey
+						loopPrimaryKey(primaryKeyCondition,table,pageIndexInTable,pagePrimaryKey,indexInPage,sqlTerms,result,primaryKeyTuple);
+					}
+					else //OR and XOR exist, loop on all the table
+					{
+						result = queryAllTheTable(table,sqlTerms,arrayOperators);
+					}
+
+				}
+				else //second case: the primary key not included so will search in the whole table
+				{
+					result = queryAllTheTable(table,sqlTerms,arrayOperators);
+				}
+			}
+			else //the table contained an index that has at least one column that matches with the query conditions
+			{
+				HashSet<String> filteredBuckets= getAllFilteredBuckets(maxIndexColumnsNames,sqlTerms,arrayOperators,maxIndex,table);
+				//loop on all buckets and get your tuples using queryAllBuckets
+				result = queryAllBuckets(table,sqlTerms,arrayOperators,filteredBuckets);
+			}
+			Vector<Tuple> finalResult = new Vector<>();
+			for(Tuple tupleInHand : result)
+			{
+				//check which conditions in the query are satisfied on tupleInHand
+				Vector<Boolean> conditionsSatisfied = new Vector();
+				for(int k=0; k<sqlTerms.length; k++)
+				{
+					String columnName = sqlTerms[k]._strColumnName;//column name of the condition
+					Object value= sqlTerms[k]._objValue;//the value in the query
+					switch(sqlTerms[k]._strOperator)
 					{
 						case ">":
-							//Will check all the conditions on all tuples after this primary key tuple
-							//loop on the table beginning from the tuple after the primary key
-							result = loopOnGreaterThan(table,pageIndexInTable,pagePrimaryKey,indexInPage,sqlTerms);
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)>0);
 							break;
 						case ">=":
-							//Will check all the conditions on all tuples on this primary key tuple and after this primary key tuple
-							//loop on table from primary key till the end
-							for(int i=pageIndexInTable; i<table.pagesPath.size();i++)
-							{
-								String pagePath= table.pagesPath.get(i);
-								Vector <Tuple> page = deserialize(table.pagesPath.get(i));
-								//loop on each page
-								for(int j=0; j<page.size();j++)
-								{
-									//if this is the primary key page, begin from the primary key index
-									if(page==pagePrimaryKey)
-										j=indexInPage;//begin from the the primary key tuple that I have
-									boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
-									Tuple tupleInHand = page.get(j);
-									//check that all conditions in the query are satisfied on tupleInHand
-									for(int k=0; k<sqlTerms.length; k++)
-									{
-										String columnName = sqlTerms[k]._strColumnName;
-										Object value= sqlTerms[k]._objValue;//the value in the query
-										switch(sqlTerms[k]._strOperator)
-										{
-											case ">":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
-													conditionsSatisfied=false;
-												break;
-											case ">=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
-													conditionsSatisfied=false;
-												break;
-											case "<":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
-													conditionsSatisfied=false;
-												break;
-											case "<=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
-													conditionsSatisfied=false;
-												break;
-											case "!=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
-													conditionsSatisfied=false;
-												break;
-											case "=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
-													conditionsSatisfied=false;
-												break;
-											default:
-												System.out.println("Operator not valid");
-										}
-										//if one condition is not satisfied, I do not need to continue checking on this tuple
-										if(!conditionsSatisfied)
-											break;
-									}
-									//I finished checking. If all conditions satisfied, add it to result
-									if(conditionsSatisfied)
-										result.add(tupleInHand);
-								}
-							}
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0);
 							break;
 						case "<":
-							//Will check all the conditions on all tuples before this primary key tuple
-							//loop on the table from beginning till the page that contains the primary key tuple
-							for(int i=0; i<=pageIndexInTable;i++)
-							{
-								String pagePath= table.pagesPath.get(i);
-								Vector <Tuple> page = deserialize(table.pagesPath.get(i));
-								//loop on each page
-								for(int j=0; j<page.size();j++)
-								{
-									boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
-									Tuple tupleInHand = page.get(j);
-									//if I reached the primary key tuple, do not add it and break
-									if(tupleInHand==primaryKeyTuple)
-										break;
-									//check that all conditions in the query are satisfied on tupleInHand
-									for(int k=0; k<sqlTerms.length; k++)
-									{
-										String columnName = sqlTerms[k]._strColumnName;
-										Object value= sqlTerms[k]._objValue;//the value in the query
-										switch(sqlTerms[k]._strOperator)
-										{
-											case ">":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
-													conditionsSatisfied=false;
-												break;
-											case ">=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
-													conditionsSatisfied=false;
-												break;
-											case "<":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
-													conditionsSatisfied=false;
-												break;
-											case "<=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
-													conditionsSatisfied=false;
-												break;
-											case "!=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
-													conditionsSatisfied=false;
-												break;
-											case "=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
-													conditionsSatisfied=false;
-												break;
-											default:
-												System.out.println("Operator not valid");
-										}
-										//if one condition is not satisfied, I do not need to continue checking on this tuple
-										if(!conditionsSatisfied)
-											break;
-									}
-									//I finished checking. If all conditions satisfied, add it to result
-									if(conditionsSatisfied)
-										result.add(tupleInHand);
-								}
-							}
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)<0);
 							break;
 						case "<=":
-							//Will check all the conditions on this primary key tuple and before this primary key tuple
-							for(int i=0; i<=pageIndexInTable;i++)
-							{
-								String pagePath= table.pagesPath.get(i);
-								Vector <Tuple> page = deserialize(table.pagesPath.get(i));
-								//loop on each page
-								for(int j=0; j<page.size();j++)
-								{
-									boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
-									Tuple tupleInHand = page.get(j);
-									//check that all conditions in the query are satisfied on tupleInHand
-									for(int k=0; k<sqlTerms.length; k++)
-									{
-										String columnName = sqlTerms[k]._strColumnName;
-										Object value= sqlTerms[k]._objValue;//the value in the query
-										switch(sqlTerms[k]._strOperator)
-										{
-											case ">":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
-													conditionsSatisfied=false;
-												break;
-											case ">=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
-													conditionsSatisfied=false;
-												break;
-											case "<":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
-													conditionsSatisfied=false;
-												break;
-											case "<=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
-													conditionsSatisfied=false;
-												break;
-											case "!=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
-													conditionsSatisfied=false;
-												break;
-											case "=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
-													conditionsSatisfied=false;
-												break;
-											default:
-												System.out.println("Operator not valid");
-										}
-										//if one condition is not satisfied, I do not need to continue checking on this tuple
-										if(!conditionsSatisfied)
-											break;
-									}
-									//I finished checking. If all conditions satisfied, add it to result
-									if(conditionsSatisfied)
-										result.add(tupleInHand);
-									//if I reached the primary key tuple, checked conditions on it, break
-									if(tupleInHand==primaryKeyTuple)
-										break;
-								}
-							}
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0);
 							break;
 						case "!=":
-							//Will check all conditions on all tuples except this primary key tuple
-							//loop on the table
-							for(int i=0; i<table.pagesPath.size();i++)
-							{
-								String pagePath= table.pagesPath.get(i);
-								Vector <Tuple> page = deserialize(table.pagesPath.get(i));
-								//loop on each page
-								for(int j=0; j<page.size();j++)
-								{
-									boolean conditionsSatisfied = true;//assume all conditions satisfied
-									Tuple tupleInHand = page.get(j);
-									if(tupleInHand==primaryKeyTuple)
-										continue;
-									//check that all conditions in the query are satisfied on tupleInHand
-									for(int k=0; k<sqlTerms.length; k++)
-									{
-										String columnName = sqlTerms[k]._strColumnName;
-										Object value= sqlTerms[k]._objValue;//the value in the query
-										switch(sqlTerms[k]._strOperator)
-										{
-											case ">":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
-													conditionsSatisfied=false;
-												break;
-											case ">=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
-													conditionsSatisfied=false;
-												break;
-											case "<":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
-													conditionsSatisfied=false;
-												break;
-											case "<=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
-													conditionsSatisfied=false;
-												break;
-											case "!=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
-													conditionsSatisfied=false;
-												break;
-											case "=":
-												if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
-													conditionsSatisfied=false;
-												break;
-											default:
-												System.out.println("Operator not valid");
-										}
-										//if one condition is not satisfied, I do not need to continue checking on this tuple
-										if(!conditionsSatisfied)
-											break;
-									}
-									//I finished checking. If all conditions satisfied, add it to result
-									if(conditionsSatisfied)
-										result.add(tupleInHand);
-								}
-							}
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0);
 							break;
 						case "=":
-							//Will check all conditions on only this primary key tuple
-							boolean conditionsSatisfied = true;
-							for(int k=0; k<sqlTerms.length; k++)
-							{
-								String columnName = sqlTerms[k]._strColumnName;
-								Object value= sqlTerms[k]._objValue;//the value in the query
-								switch(sqlTerms[k]._strOperator)
-								{
-									case ">":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)>0))
-											conditionsSatisfied=false;
-										break;
-									case ">=":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)>=0))
-											conditionsSatisfied=false;
-										break;
-									case "<":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)<0))
-											conditionsSatisfied=false;
-										break;
-									case "<=":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)<=0))
-											conditionsSatisfied=false;
-										break;
-									case "!=":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)!=0))
-											conditionsSatisfied=false;
-										break;
-									case "=":
-										if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)==0))
-											conditionsSatisfied=false;
-										break;
-									default:
-										System.out.println("Operator not valid");
-								}
-								//if one condition is not satisfied, I do not need to continue checking on this tuple
-								if(!conditionsSatisfied)
-									break;
-							}
-							if(conditionsSatisfied)
-								result.add(primaryKeyTuple);
+							conditionsSatisfied.add(comparisonForSelect(tupleInHand.data.get(columnName),value)==0);
 							break;
 						default:
 							System.out.println("Operator not valid");
 					}
+
 				}
-				else //OR and XOR exist, loop on all the table
-				{
-					result = queryAllTheTable(table,sqlTerms,arrayOperators);
-				}
+				//I finished checking. If conditions and operators result to true, add it to result
+
+				if(conditionsResult(conditionsSatisfied,arrayOperators))
+					finalResult.add(tupleInHand);
 
 			}
-			else //second case: the primary key not included so will search in the whole table
-			{
-				result = queryAllTheTable(table,sqlTerms,arrayOperators);
-			}
+
+
+			// we will do something to convert from vector to Iterator
+			return finalResult.iterator();
 		}
-		else //the table contained an index that has at least one column that matches with the query conditions
-		{
-			HashSet<String> filteredBuckets= getAllFilteredBuckets(maxIndexColumnsNames,sqlTerms,arrayOperators,maxIndex,table);
-			//loop on all buckets and get your tuples using queryAllBuckets
-			result = queryAllBuckets(table,sqlTerms,arrayOperators,filteredBuckets);
-		}
-		// we will do something to convert from vector to Iterator
-		return result.iterator();
 	}
+
+	public static void loopPrimaryKey(SQLTerm primaryKeyCondition, Table table, int pageIndexInTable, Vector<Tuple> pagePrimaryKey, int indexInPage, SQLTerm[] sqlTerms, HashSet<Tuple> result, Tuple primaryKeyTuple)
+	{
+		switch (primaryKeyCondition._strOperator)
+		{
+			case ">":
+				//Will check all the conditions on all tuples after this primary key tuple
+				//loop on the table beginning from the tuple after the primary key
+				for(int i=pageIndexInTable; i<table.pagesPath.size();i++)
+				{
+					Vector <Tuple> page = deserialize(table.pagesPath.get(i));
+					//loop on each page
+					for(int j=0; j<page.size();j++)
+					{
+						//if this is the primary key page, begin from the primary key index
+						if(page==pagePrimaryKey)
+							j=indexInPage+1;//begin from the first tuple after the primary key that I have
+						boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
+						//if primary key is the last element in page, .get(j+1) will cause an exception, go next page
+						Tuple tupleInHand = null;
+						try{
+							tupleInHand = page.get(j);
+						}
+						catch (IndexOutOfBoundsException e)
+						{
+							break;
+						}
+						//check that all conditions in the query are satisfied on tupleInHand
+						for(int k=0; k<sqlTerms.length; k++)
+						{
+							String columnName = sqlTerms[k]._strColumnName;
+							Object value= sqlTerms[k]._objValue;//the value in the query
+							switch(sqlTerms[k]._strOperator)
+							{
+								case ">":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
+										conditionsSatisfied=false;
+									break;
+								case ">=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
+										conditionsSatisfied=false;
+									break;
+								case "<":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
+										conditionsSatisfied=false;
+									break;
+								case "<=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
+										conditionsSatisfied=false;
+									break;
+								case "!=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
+										conditionsSatisfied=false;
+									break;
+								case "=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
+										conditionsSatisfied=false;
+									break;
+								default:
+									System.out.println("Operator not valid");
+							}
+							//if one condition is not satisfied, I do not need to continue checking on this tuple
+							if(!conditionsSatisfied)
+								break;
+						}
+						//I finished checking. If all conditions satisfied, add it to result
+						if(conditionsSatisfied)
+							result.add(tupleInHand);
+					}
+				}
+				break;
+			case ">=":
+				//Will check all the conditions on all tuples on this primary key tuple and after this primary key tuple
+				//loop on table from primary key till the end
+				for(int i=pageIndexInTable; i<table.pagesPath.size();i++)
+				{
+					String pagePath= table.pagesPath.get(i);
+					Vector <Tuple> page = deserialize(table.pagesPath.get(i));
+					//loop on each page
+					for(int j=0; j<page.size();j++)
+					{
+						//if this is the primary key page, begin from the primary key index
+						if(page==pagePrimaryKey)
+							j=indexInPage;//begin from the the primary key tuple that I have
+						boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
+						Tuple tupleInHand = page.get(j);
+						//check that all conditions in the query are satisfied on tupleInHand
+						for(int k=0; k<sqlTerms.length; k++)
+						{
+							String columnName = sqlTerms[k]._strColumnName;
+							Object value= sqlTerms[k]._objValue;//the value in the query
+							switch(sqlTerms[k]._strOperator)
+							{
+								case ">":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
+										conditionsSatisfied=false;
+									break;
+								case ">=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
+										conditionsSatisfied=false;
+									break;
+								case "<":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
+										conditionsSatisfied=false;
+									break;
+								case "<=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
+										conditionsSatisfied=false;
+									break;
+								case "!=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
+										conditionsSatisfied=false;
+									break;
+								case "=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
+										conditionsSatisfied=false;
+									break;
+								default:
+									System.out.println("Operator not valid");
+							}
+							//if one condition is not satisfied, I do not need to continue checking on this tuple
+							if(!conditionsSatisfied)
+								break;
+						}
+						//I finished checking. If all conditions satisfied, add it to result
+						if(conditionsSatisfied)
+							result.add(tupleInHand);
+					}
+				}
+				break;
+			case "<":
+				//Will check all the conditions on all tuples before this primary key tuple
+				//loop on the table from beginning till the page that contains the primary key tuple
+				for(int i=0; i<=pageIndexInTable;i++)
+				{
+					String pagePath= table.pagesPath.get(i);
+					Vector <Tuple> page = deserialize(table.pagesPath.get(i));
+					//loop on each page
+					for(int j=0; j<page.size();j++)
+					{
+						boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
+						Tuple tupleInHand = page.get(j);
+						//if I reached the primary key tuple, do not add it and break
+						if(tupleInHand==primaryKeyTuple)
+							break;
+						//check that all conditions in the query are satisfied on tupleInHand
+						for(int k=0; k<sqlTerms.length; k++)
+						{
+							String columnName = sqlTerms[k]._strColumnName;
+							Object value= sqlTerms[k]._objValue;//the value in the query
+							switch(sqlTerms[k]._strOperator)
+							{
+								case ">":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
+										conditionsSatisfied=false;
+									break;
+								case ">=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
+										conditionsSatisfied=false;
+									break;
+								case "<":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
+										conditionsSatisfied=false;
+									break;
+								case "<=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
+										conditionsSatisfied=false;
+									break;
+								case "!=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
+										conditionsSatisfied=false;
+									break;
+								case "=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
+										conditionsSatisfied=false;
+									break;
+								default:
+									System.out.println("Operator not valid");
+							}
+							//if one condition is not satisfied, I do not need to continue checking on this tuple
+							if(!conditionsSatisfied)
+								break;
+						}
+						//I finished checking. If all conditions satisfied, add it to result
+						if(conditionsSatisfied)
+							result.add(tupleInHand);
+					}
+				}
+				break;
+			case "<=":
+				//Will check all the conditions on this primary key tuple and before this primary key tuple
+				for(int i=0; i<=pageIndexInTable;i++)
+				{
+					String pagePath= table.pagesPath.get(i);
+					Vector <Tuple> page = deserialize(table.pagesPath.get(i));
+					//loop on each page
+					for(int j=0; j<page.size();j++)
+					{
+						boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
+						Tuple tupleInHand = page.get(j);
+						//check that all conditions in the query are satisfied on tupleInHand
+						for(int k=0; k<sqlTerms.length; k++)
+						{
+							String columnName = sqlTerms[k]._strColumnName;
+							Object value= sqlTerms[k]._objValue;//the value in the query
+							switch(sqlTerms[k]._strOperator)
+							{
+								case ">":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
+										conditionsSatisfied=false;
+									break;
+								case ">=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
+										conditionsSatisfied=false;
+									break;
+								case "<":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
+										conditionsSatisfied=false;
+									break;
+								case "<=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
+										conditionsSatisfied=false;
+									break;
+								case "!=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
+										conditionsSatisfied=false;
+									break;
+								case "=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
+										conditionsSatisfied=false;
+									break;
+								default:
+									System.out.println("Operator not valid");
+							}
+							//if one condition is not satisfied, I do not need to continue checking on this tuple
+							if(!conditionsSatisfied)
+								break;
+						}
+						//I finished checking. If all conditions satisfied, add it to result
+						if(conditionsSatisfied)
+							result.add(tupleInHand);
+						//if I reached the primary key tuple, checked conditions on it, break
+						if(tupleInHand==primaryKeyTuple)
+							break;
+					}
+				}
+				break;
+			case "!=":
+				//Will check all conditions on all tuples except this primary key tuple
+				//loop on the table
+				for(int i=0; i<table.pagesPath.size();i++)
+				{
+					String pagePath= table.pagesPath.get(i);
+					Vector <Tuple> page = deserialize(table.pagesPath.get(i));
+					//loop on each page
+					for(int j=0; j<page.size();j++)
+					{
+						boolean conditionsSatisfied = true;//assume all conditions satisfied
+						Tuple tupleInHand = page.get(j);
+						if(tupleInHand==primaryKeyTuple)
+							continue;
+						//check that all conditions in the query are satisfied on tupleInHand
+						for(int k=0; k<sqlTerms.length; k++)
+						{
+							String columnName = sqlTerms[k]._strColumnName;
+							Object value= sqlTerms[k]._objValue;//the value in the query
+							switch(sqlTerms[k]._strOperator)
+							{
+								case ">":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
+										conditionsSatisfied=false;
+									break;
+								case ">=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
+										conditionsSatisfied=false;
+									break;
+								case "<":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
+										conditionsSatisfied=false;
+									break;
+								case "<=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
+										conditionsSatisfied=false;
+									break;
+								case "!=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
+										conditionsSatisfied=false;
+									break;
+								case "=":
+									if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
+										conditionsSatisfied=false;
+									break;
+								default:
+									System.out.println("Operator not valid");
+							}
+							//if one condition is not satisfied, I do not need to continue checking on this tuple
+							if(!conditionsSatisfied)
+								break;
+						}
+						//I finished checking. If all conditions satisfied, add it to result
+						if(conditionsSatisfied)
+							result.add(tupleInHand);
+					}
+				}
+				break;
+			case "=":
+				//Will check all conditions on only this primary key tuple
+				boolean conditionsSatisfied = true;
+				for(int k=0; k<sqlTerms.length; k++)
+				{
+					String columnName = sqlTerms[k]._strColumnName;
+					Object value= sqlTerms[k]._objValue;//the value in the query
+					switch(sqlTerms[k]._strOperator)
+					{
+						case ">":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)>0))
+								conditionsSatisfied=false;
+							break;
+						case ">=":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)>=0))
+								conditionsSatisfied=false;
+							break;
+						case "<":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)<0))
+								conditionsSatisfied=false;
+							break;
+						case "<=":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)<=0))
+								conditionsSatisfied=false;
+							break;
+						case "!=":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)!=0))
+								conditionsSatisfied=false;
+							break;
+						case "=":
+							if(!(comparisonForSelect(primaryKeyTuple.data.get(columnName),value)==0))
+								conditionsSatisfied=false;
+							break;
+						default:
+							System.out.println("Operator not valid");
+					}
+					//if one condition is not satisfied, I do not need to continue checking on this tuple
+					if(!conditionsSatisfied)
+						break;
+				}
+				if(conditionsSatisfied)
+					result.add(primaryKeyTuple);
+				break;
+			default:
+				System.out.println("Operator not valid");
+		}
+	}
+
+
+	//////////////////////////
 	// to get the buckets of each statment
 	public static HashSet <String> getAllFilteredBuckets(Vector<String>maxIndexColumnsNames, SQLTerm[] sqlTerms,String[] arrayOperators, Object[] maxIndex, Table table)
 	{
@@ -1631,9 +1785,9 @@ public class DBApp implements DBAppInterface, Serializable {
 		return layersSqlTerms;
 	}
 
-	public static Vector<Tuple> queryAllBuckets(Table table,SQLTerm[] sqlTerms, String[] arrayOperators, HashSet<String> filteredBuckets)
+	public static HashSet<Tuple> queryAllBuckets(Table table,SQLTerm[] sqlTerms, String[] arrayOperators, HashSet<String> filteredBuckets)
 	{
-		Vector<Tuple> result = new Vector<>();
+		HashSet<Tuple> result = new HashSet<>();
 		HashSet<String> pages = new HashSet<>();
 		for(String s : filteredBuckets) //looping on the vector of buckets
 		{
@@ -1695,8 +1849,8 @@ public class DBApp implements DBAppInterface, Serializable {
 		return result;
 	}
 
-	public static Vector<Tuple> queryAllTheTable(Table table,SQLTerm[] sqlTerms, String[] arrayOperators){
-		Vector<Tuple> result = new Vector<>();
+	public static HashSet<Tuple> queryAllTheTable(Table table,SQLTerm[] sqlTerms, String[] arrayOperators){
+		HashSet<Tuple> result = new HashSet<>();
 		//loop on the table
 		for(int i=0; i<table.pagesPath.size();i++)
 		{
@@ -1743,91 +1897,19 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return result;
 	}
-	public static Vector<Tuple> loopOnGreaterThan(Table table, int pageIndexInTable, Vector<Tuple> pagePrimaryKey, int indexInPage, SQLTerm[] sqlTerms)
-	{
-		Vector<Tuple> result = new Vector<>();
-		for(int i=pageIndexInTable; i<table.pagesPath.size();i++)
-		{
-			Vector <Tuple> page = deserialize(table.pagesPath.get(i));
-			//loop on each page
-			for(int j=0; j<page.size();j++)
-			{
-				//if this is the primary key page, begin from the primary key index
-				if(page==pagePrimaryKey)
-					j=indexInPage+1;//begin from the first tuple after the primary key that I have
-				boolean conditionsSatisfied = true;//assume all conditions satisfied on this tuple
-				//if primary key is the last element in page, .get(j+1) will cause an exception, go next page
-				Tuple tupleInHand = null;
-				try{
-					tupleInHand = page.get(j);
-				}
-				catch (IndexOutOfBoundsException e)
-				{
-					break;
-				}
-				//check that all conditions in the query are satisfied on tupleInHand
-				for(int k=0; k<sqlTerms.length; k++)
-				{
-					String columnName = sqlTerms[k]._strColumnName;
-					Object value= sqlTerms[k]._objValue;//the value in the query
-					switch(sqlTerms[k]._strOperator)
-					{
-						case ">":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>0))
-								conditionsSatisfied=false;
-							break;
-						case ">=":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)>=0))
-								conditionsSatisfied=false;
-							break;
-						case "<":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<0))
-								conditionsSatisfied=false;
-							break;
-						case "<=":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)<=0))
-								conditionsSatisfied=false;
-							break;
-						case "!=":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)!=0))
-								conditionsSatisfied=false;
-							break;
-						case "=":
-							if(!(comparisonForSelect(tupleInHand.data.get(columnName),value)==0))
-								conditionsSatisfied=false;
-							break;
-						default:
-							System.out.println("Operator not valid");
-					}
-					//if one condition is not satisfied, I do not need to continue checking on this tuple
-					if(!conditionsSatisfied)
-						break;
-				}
-				//I finished checking. If all conditions satisfied, add it to result
-				if(conditionsSatisfied)
-					result.add(tupleInHand);
-			}
-		}
-		return result;
-	}
-
 
 	public static boolean conditionsResult(Vector<Boolean>conditionsSatisfied, String[]arrayOperators){
 		//[true,false,true] [OR,AND] [true, OR, false,
 		//order operators on an array based on priority
-		String[] operatorsOrdered = new String[2];
-		operatorsOrdered[0]="OR";
-		operatorsOrdered[1]="XOR";
+		String[] operatorsOrdered = new String[3];
+		operatorsOrdered[0]="AND";
+		operatorsOrdered[1]="OR";
+		operatorsOrdered[2]="XOR";
 		// put all operands and operators in the same vector [true, "AND", false, "OR", true, "XOR", true]
 		Vector<Object> conditionsResult = new Vector<>();
 		conditionsResult.add(conditionsSatisfied.get(0));
 		for(int i=1; i<conditionsSatisfied.size(); i++)//[false,OR,false
 		{
-			if(arrayOperators[i-1].equals("AND"))
-			{
-				conditionsResult.add((boolean)conditionsResult.remove(conditionsResult.size()-1) && conditionsSatisfied.remove(i));
-				continue;
-			}
 			conditionsResult.add(arrayOperators[i-1]);
 			conditionsResult.add(conditionsSatisfied.get(i));
 		}
@@ -1839,6 +1921,15 @@ public class DBApp implements DBAppInterface, Serializable {
 				String operatorInHand = (String) conditionsResult.get(j);
 				if(operatorInHand.equals(highestOperator)){//if this is the highest priority operator, apply it
 					switch (highestOperator){
+						case "AND": {
+							boolean newAdded = (Boolean) conditionsResult.get(j-1) && (Boolean) conditionsResult.get(j+1);
+							conditionsResult.remove(j-1);
+							conditionsResult.remove(j-1);
+							conditionsResult.remove(j-1);
+							conditionsResult.insertElementAt(newAdded,j-1);
+							j-=2;
+							break;
+						}
 						case "OR": {
 							boolean newAdded = (Boolean) conditionsResult.get(j-1) || (Boolean) conditionsResult.get(j+1);
 							conditionsResult.remove(j-1);
@@ -2127,7 +2218,7 @@ public class DBApp implements DBAppInterface, Serializable {
 
 		BufferedReader studentsTable = new BufferedReader(new FileReader("src/main/resources/students_table.csv"));
 		String record;
-		int c = 5;
+		int c = 10;
 
 		Hashtable<String, Object> row = new Hashtable<>();
 		while ((record = studentsTable.readLine()) != null && c > 0) {
@@ -2153,109 +2244,113 @@ public class DBApp implements DBAppInterface, Serializable {
 			c--;
 		}
 		studentsTable.close();
-		String[] column = new String[2];
-		column[0]="dob";
-		column[1]="gpa";
-		dbApp.createIndex("students",column);
-		Table table = tables.get("students");
-		Object[] grid = table.indices.get(0);
+//		String[] column = new String[2];
+//		column[0]="dob";
+//		column[1]="gpa";
+//		dbApp.createIndex("students",column);
+//		Table table = tables.get("students");
+//		Object[] grid = table.indices.get(0);
+//
+//		Vector<Boolean> conditionsSatisfied = new Vector<>();
+//		conditionsSatisfied.add(true);
+//		conditionsSatisfied.add(true);
+//		conditionsSatisfied.add(false);
+//		String[]arrayOperators = {"AND", "OR"};
+//		System.out.println(conditionsResult(conditionsSatisfied, arrayOperators));
 
+		SQLTerm sqlTerm1 = new SQLTerm();
+		sqlTerm1._strTableName = "students";
+		sqlTerm1._strColumnName =  "id";
+		sqlTerm1._strOperator= ">";
+		sqlTerm1._objValue	= "66-1766";
+		SQLTerm sqlTerm2 = new SQLTerm();
+		sqlTerm2._strTableName = "students";
+		sqlTerm2._strColumnName =  "id";
+		sqlTerm2._strOperator= "<";
+		sqlTerm2._objValue	= 	"50-7952";
+		SQLTerm sqlTerm3 = new SQLTerm();
+		sqlTerm3._strTableName = "students";
+		sqlTerm3._strColumnName =  "gpa";
+		sqlTerm3._strOperator= ">=";
+		sqlTerm3._objValue	= 	3.63;
+
+		SQLTerm[] arrayOfSql = new SQLTerm[2];
+		arrayOfSql[0]= sqlTerm1;
+		arrayOfSql[1]= sqlTerm2;
+//		arrayOfSql[2]= sqlTerm3;
+		String[] operators = new String[1];
+		operators[0]="OR";
+//		operators[1]="OR";
+		Iterator itr = dbApp.selectFromTable(arrayOfSql,operators);
+		int count = 0;
+		while(itr.hasNext()) {
+			Object element = itr.next();
+			System.out.println(element + " ");
+			count++;
+		}
+		System.out.println("Iterator: " + count);
+
+//		Hashtable<String, Object> toBeDeleted = new Hashtable<>();
+//		toBeDeleted.put("last_name", "ExpTgL");
 //
 //
-//
-//		SQLTerm sqlTerm1 = new SQLTerm();
-//		sqlTerm1._strTableName = "students";
-//		sqlTerm1._strColumnName =  "gpa";
-//		sqlTerm1._strOperator= ">=";
-//		sqlTerm1._objValue	= 	"3.12";
-//		SQLTerm sqlTerm2 = new SQLTerm();
-//		sqlTerm2._strTableName = "students";
-//		sqlTerm2._strColumnName =  "id";
-//		sqlTerm2._strOperator= "=";
-//		sqlTerm2._objValue	= 	"59-8196";
-//		SQLTerm sqlTerm3 = new SQLTerm();
-//		sqlTerm3._strTableName = "students";
-//		sqlTerm3._strColumnName =  "gpa";
-//		sqlTerm3._strOperator= ">=";
-//		sqlTerm3._objValue	= 	"3.63";
-//
-//		SQLTerm[] arrayOfSql = new SQLTerm[2];
-//		arrayOfSql[0]= sqlTerm1;
-//		arrayOfSql[1]= sqlTerm2;
-////		arrayOfSql[2]= sqlTerm3;
-//		String[] operators = new String[1];
-//		operators[0]="AND";
-////		operators[1]="OR";
-//		Iterator itr = dbApp.selectFromTable(arrayOfSql,operators);
-//		int count = 0;
-//		while(itr.hasNext()) {
-//			Object element = itr.next();
-//			System.out.println(element + " ");
-//			count++;
+//		for(int i=0;i<10;i++)
+//		{
+//			Arrays.toString(grid);
+//			Object[] secondLayer =  (Object[]) grid[i];
+//			for(int j=0; j<10; j++)
+//			{
+//				Vector<Vector<String>> pagesPath = deserializeBucket((String)(secondLayer[j]));
+//				System.out.println(table.ranges.get("dob")[i] + " " + table.ranges.get("gpa")[j]);
+//				for(int k=0;k<pagesPath.get(0).size();k++)
+//				{
+//					System.out.println(deserialize(pagesPath.get(0).get(k)));
+//				}
+//				System.out.println("/////////////////////");
+//			}
 //		}
-//		System.out.println("Iterator: " + count);
-
-		Hashtable<String, Object> toBeDeleted = new Hashtable<>();
-		toBeDeleted.put("last_name", "ExpTgL");
-
-
-		for(int i=0;i<10;i++)
-		{
-			Arrays.toString(grid);
-			Object[] secondLayer =  (Object[]) grid[i];
-			for(int j=0; j<10; j++)
-			{
-				Vector<Vector<String>> pagesPath = deserializeBucket((String)(secondLayer[j]));
-				System.out.println(table.ranges.get("dob")[i] + " " + table.ranges.get("gpa")[j]);
-				for(int k=0;k<pagesPath.get(0).size();k++)
-				{
-					System.out.println(deserialize(pagesPath.get(0).get(k)));
-				}
-				System.out.println("/////////////////////");
-			}
-		}
-
-		for(int i=0;i<table.pagesPath.size();i++)
-		{
-			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-			for(int j=0;j<page.size();j++)
-			{
-				System.out.println(page.get(j));
-			}
-			System.out.println("ana page");
-		}
-
-	//	System.out.println("************************************************************************************************8");
-
-		dbApp.deleteFromTable("students", toBeDeleted);
-
-		for(int i=0;i<table.pagesPath.size();i++)
-		{
-			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-			for(int j=0;j<page.size();j++)
-			{
-				System.out.println(page.get(j));
-			}
-			System.out.println("ana page");
-		}
-
-
-
-		for(int i=0;i<10;i++)
-		{
-			Arrays.toString(grid);
-			Object[] secondLayer =  (Object[]) grid[i];
-			for(int j=0; j<10; j++)
-			{
-				Vector<Vector<String>> pagesPath = deserializeBucket((String)(secondLayer[j]));
-				System.out.println(table.ranges.get("dob")[i] + " " + table.ranges.get("gpa")[j]);
-				for(int k=0;k<pagesPath.get(0).size();k++)
-				{
-					System.out.println(deserialize(pagesPath.get(0).get(k)));
-				}
-				System.out.println("/////////////////////");
-			}
-		}
+//
+//		for(int i=0;i<table.pagesPath.size();i++)
+//		{
+//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+//			for(int j=0;j<page.size();j++)
+//			{
+//				System.out.println(page.get(j));
+//			}
+//			System.out.println("ana page");
+//		}
+//
+//		System.out.println("************************************************************************************************8");
+//
+//		dbApp.deleteFromTable("students", toBeDeleted);
+//
+//		for(int i=0;i<table.pagesPath.size();i++)
+//		{
+//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+//			for(int j=0;j<page.size();j++)
+//			{
+//				System.out.println(page.get(j));
+//			}
+//			System.out.println("ana page");
+//		}
+//
+//
+//
+//		for(int i=0;i<10;i++)
+//		{
+//			Arrays.toString(grid);
+//			Object[] secondLayer =  (Object[]) grid[i];
+//			for(int j=0; j<10; j++)
+//			{
+//				Vector<Vector<String>> pagesPath = deserializeBucket((String)(secondLayer[j]));
+//				System.out.println(table.ranges.get("dob")[i] + " " + table.ranges.get("gpa")[j]);
+//				for(int k=0;k<pagesPath.get(0).size();k++)
+//				{
+//					System.out.println(deserialize(pagesPath.get(0).get(k)));
+//				}
+//				System.out.println("/////////////////////");
+//			}
+//		}
 	}
 }
 
