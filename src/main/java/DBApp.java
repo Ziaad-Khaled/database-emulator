@@ -1,8 +1,14 @@
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.ParseTreeWalker;
+
 import java.io.*;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.sql.Array;
 import java.sql.Timestamp;
 import java.text.ParseException;
 import java.util.*;
@@ -92,6 +98,54 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		tables.put(tableName, t);
 	}
+	public static void indexToMetadata(String tableName, String[] colName) throws DBAppException{
+		String filePath = "./src/main/resources/metadata.csv";
+		String input = null;
+		Scanner sc;
+		try
+		{
+			sc = new Scanner(new File(filePath));
+		}
+		catch(FileNotFoundException e)
+		{
+			throw new DBAppException("Table file not found");
+		}
+		StringBuffer sb = new StringBuffer();
+		sb.append(sc.nextLine() + "\n");
+		while (sc.hasNextLine()) {
+			input = sc.nextLine();
+			String[] arr = input.split(",");
+			while(arr[0].equals(tableName))
+			{
+				if(Arrays.asList(colName).contains(arr[1]))
+					arr[4]="True";
+				sb.append(String.join(",", arr) + "\n");
+				if(sc.hasNextLine())
+				{
+					input = sc.nextLine();
+					arr = input.split(",");
+				}
+				else
+					break;
+			}
+			if(!arr[0].equals(tableName))
+			{
+				sb.append(input + "\n");
+				continue;
+			}
+		}
+		PrintWriter writer;
+		try
+		{
+			writer = new PrintWriter(new File(filePath));
+		}
+		catch(FileNotFoundException e)
+		{
+			throw new DBAppException("Table file not found");
+		}
+		writer.append(sb);
+		writer.flush();
+	}
 
 	@Override
 	public void createIndex(String tableName, String[] columnNames) throws DBAppException {
@@ -112,6 +166,9 @@ public class DBApp implements DBAppInterface, Serializable {
 			if(found && columnNames.length==indicesColNames.get(i).size())
 				throw new DBAppException("This column already has an index!");
 		}
+
+
+		indexToMetadata(tableName,  columnNames);
 		HashSet<String> colNames = new HashSet<>();
 		Hashtable<String,String> colMins = new Hashtable<>();
 		Hashtable<String, String> colMaxs = new Hashtable<>();
@@ -139,9 +196,15 @@ public class DBApp implements DBAppInterface, Serializable {
 			e.printStackTrace();
 		}
 
+		System.out.println(Arrays.toString(columnNames));
+		System.out.println(colNames);
 		for(int i=0; i<columnNames.length; i++) {
 			if(!colNames.contains(columnNames[i]))
+			{
+				System.out.println(Arrays.toString(columnNames));
+				System.out.println(colNames);
 				throw new DBAppException("Invalid column Name! Cannot create an index!");
+			}
 		}
 
 
@@ -220,15 +283,12 @@ public class DBApp implements DBAppInterface, Serializable {
 			}
 		}
 	}
-
 	public static Vector<Vector<String>> addNewBucket(Vector<Vector<String>> vectorOfBucket, String path) {
 		Vector<String> bucket = new Vector<>();
 		bucket.add(path);
 		vectorOfBucket.add(bucket);
 		return vectorOfBucket;
 	}
-	/// [1-3] [3-6] [6-9]
-
 	public static Object[] multiDimensionalArray(int dimensions, int size, String path) {
 		if (dimensions < 1) {
 			throw new IndexOutOfBoundsException("non-positive dimensionality");
@@ -261,7 +321,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return bucketsPath;
 	}
-
 	public static void createDirectory(String path){
 
 		File file = new File(path);
@@ -273,7 +332,6 @@ public class DBApp implements DBAppInterface, Serializable {
 			System.out.println("The table was created previously");
 		}
 	}
-
 	public static Date convertDate(String date){
 		int year = Integer.parseInt(date.trim().substring(0, 4));
 		int month = Integer.parseInt(date.trim().substring(5, 7));
@@ -282,7 +340,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		Date dob = new Date(year - 1900, month - 1, day);
 		return dob;
 	}
-
 	public static int comparison(Object x, Object y) {
 
 		if(x instanceof String)
@@ -320,8 +377,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return 0;
 	}
-	public static double comparisonForSelect(Object x, Object y)
-	{
+	public static double comparisonForSelect(Object x, Object y){
 		//y mosalem
 		try {//3.5 3
 			return  ((Double)x - (Double) y);
@@ -355,13 +411,14 @@ public class DBApp implements DBAppInterface, Serializable {
 		return (x.toString()).compareTo(y.toString());
 
 	}
-
 	@Override
 	public void insertIntoTable(String tableName, Hashtable<String, Object> colNameValue) throws DBAppException {
 
 		Table table = tables.get(tableName);
 		Tuple tuple = new Tuple();
 		tuple.clusteringKey=table.clusteringKey;
+		String clusteringKeyMin = "", clusteringKeyMax = "", clusteringKeyType = "";
+		Object clusteringKeyValue = colNameValue.get(table.clusteringKey);
 
 		if (table.arity < colNameValue.size())
 			throw new DBAppException("The inserted values are more than the number of columns!");
@@ -381,6 +438,11 @@ public class DBApp implements DBAppInterface, Serializable {
 				if (!arr[0].equals(tableName))
 					continue;
 				metadata.add(arr);
+				if(arr[1].equals(table.clusteringKey)){
+					clusteringKeyMin = arr[5];
+					clusteringKeyMax = arr[6];
+					clusteringKeyType = arr[2];
+				}
 			}
 			myReader.close();
 		} catch (FileNotFoundException e) {
@@ -433,6 +495,79 @@ public class DBApp implements DBAppInterface, Serializable {
 
 
 		} else {
+
+			Object[] grid = null;
+			int dimension = 0;
+			for(int i = 0 ; i < table.indices.size() ; i++){
+				if(table.indicesColNames.get(i).get(0).equals(table.clusteringKey)){
+					grid = table.indices.get(i);
+					dimension = table.indicesColNames.get(i).size();
+				}
+				if(table.indicesColNames.get(i).size() == 1  && table.indicesColNames.get(i).get(0).equals(table.clusteringKey))
+				{
+					dimension = 1;
+					break;
+				}
+
+			}
+			if(grid != null) {
+				Pair[] ranges = Table.getRanges(clusteringKeyMin, clusteringKeyMax, clusteringKeyType);
+				int index = Table.getIndexOfGrid(tuple.data.get(tuple.clusteringKey), ranges);
+				System.out.println(Arrays.toString(ranges));
+				System.out.println(index);
+
+				String path = "";
+				if(dimension == 1)
+				{
+					String bucketPath = (String) grid[index];
+
+					path = searchBucket(bucketPath, tuple, table);
+					//System.out.println(path);
+				}
+
+				else
+				{
+					Object[] toBeSearched = (Object[]) grid[index];
+					System.out.println(colNameValue);
+					prepareForSearch();
+					path = searchLayers(toBeSearched, clusteringKeyValue, dimension, table);
+					System.out.println(clusteringKeyValue + " " + path);
+					System.out.println(table);
+				}
+				if(path.equals("")){
+					int pageIndex = searchForPage(table, tuple);
+					path = table.pagesPath.get(pageIndex);
+				}
+				Vector<Tuple> page = deserialize(path);
+				int indexInPage = searchInPage(page, tuple);
+				System.out.println(page + " " + indexInPage);
+				try {
+					if (tuple.compareTo(page.get(indexInPage)) == 0) {
+						throw new DBAppException("This primary key already exists");
+					}
+				} catch (ArrayIndexOutOfBoundsException e) {
+				}
+				indexInPage++;
+
+				if (page.size() == readConfigRows()) { // page 0,1
+					page.insertElementAt(tuple, indexInPage);
+					Tuple last = page.remove(page.size() - 1);
+					serialize(path, page);   // 1 - remove page 1 fro
+					String newPath = shiftPage(table, path, last);
+					//milestone2
+					indexAfterInserting(path,tuple,table);
+					indexAfterInserting(newPath, last, table);
+					indexAfterDeletion(path,last, table,page);
+				} else {
+					page.insertElementAt(tuple, indexInPage);
+					serialize(path, page);
+					//milestone2
+					indexAfterInserting(path,tuple,table);
+				}
+				return;
+			}
+
+
 			int page_index = searchForPage(table, tuple);
 			String path = "";
 			try {
@@ -539,7 +674,6 @@ public class DBApp implements DBAppInterface, Serializable {
 			}
 		}
 	}
-
 	public static Vector<Vector<String>> deletePageFromBucket(Vector<Vector<String>> vectorOfBucket, int bucketIndex, int index) {
 		vectorOfBucket.get(bucketIndex).remove(index);
 		Vector<String> a5erBucket = vectorOfBucket.get(vectorOfBucket.size()-1);
@@ -556,8 +690,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return vectorOfBucket;
 	}
-
-
 	public static void indexAfterInserting(String pagePath,Tuple tuple, Table table){
 
 		for(int i=0;i<table.indices.size();i++)
@@ -603,7 +735,6 @@ public class DBApp implements DBAppInterface, Serializable {
 			}
 		}
 	}
-
 	public static String shiftPage(Table table, String path, Tuple last) {
 		Vector<Tuple> nextPage = new Vector<Tuple>();
 		//get the next page path
@@ -633,10 +764,8 @@ public class DBApp implements DBAppInterface, Serializable {
 		//milestone2
 		return table.pagesPath.get(nextPathIndex);
 	}
-
 	// If the record is found its index will be returned and if not the preceding
 	// index will be returned
-
 	public static int searchForPage(Table table, Tuple tuple) throws DBAppException { // [1,5],[9,13]
 		int lo = 0, hi = table.pagesPath.size() - 1;
 		int middle = (lo + hi) / 2;
@@ -711,7 +840,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		else
 			return table.pagesPath.size();
 	}
-
 	public static int searchInPage(Vector<Tuple> page, Tuple tuple) {
 
 		if (tuple.compareTo(page.get(0)) < 0)
@@ -741,7 +869,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return 0;
 	}
-
 	@Override
 	public void updateTable(String tableName, String clusteringKeyValue, Hashtable<String, Object> columnNameValue)
 			throws DBAppException {
@@ -818,6 +945,7 @@ public class DBApp implements DBAppInterface, Serializable {
 			e.printStackTrace();
 		}
 
+
 		if(grid != null) {
 			Pair[] ranges = Table.getRanges(clusteringKeyMin, clusteringKeyMax, clusteringKeyType);
 			int index = Table.getIndexOfGrid(tuple.data.get(tuple.clusteringKey), ranges);
@@ -826,6 +954,12 @@ public class DBApp implements DBAppInterface, Serializable {
 			if (dimension == 1) {
 				String bucketPath = (String) grid[index];
 				pagePath = searchBucket(bucketPath, tuple, table);
+			}
+			else
+			{
+				Object[] toBeSearched = (Object[]) grid[index];
+				prepareForSearch();
+				pagePath = searchLayers(toBeSearched, (Object) tuple,dimension,table);
 			}
 			if(pagePath.equals(""))
 			{
@@ -908,9 +1042,93 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 
 	}
+	static String searchLayersResult;
+	static String maxBeforeValuePath = "";
+	static String minAfterValuePath = "";
+	static Object maxBeforeValue = null;
+	static Object minAfterValue = null;
+	public static void prepareForSearch(){
+		searchLayersResult = "";
+		maxBeforeValuePath = "";
+	 	minAfterValuePath = "";
+ 		maxBeforeValue = null;
+ 		minAfterValue = null;
+	}
+	public static String searchLayers(Object grid, Object value, int dimension, Table table){
+		Vector<Tuple> firstPage = deserialize(table.pagesPath.get(0));
+		Vector<Tuple> lastPage = deserialize(table.pagesPath.get(table.pagesPath.size()-1));
+		Object minValueInTable = firstPage.get(0).data.get(table.clusteringKey);
+		Object maxValueInTable = lastPage.get(lastPage.size()-1).data.get(table.clusteringKey);
+		if(comparison(value, minValueInTable) < 0)
+			return table.pagesPath.get(0);
+		if(comparison(value, maxValueInTable) > 0)
+			return table.pagesPath.get(table.pagesPath.size()-1);
+		Object grid1 = null;
+		if(grid instanceof Object[])
+			grid1 = (Object[])grid;
+		else
+			grid1 = (String)grid;
+		if(dimension == 1){
 
+			String path = ((String)grid1);
+			Vector<Vector<String>> buckets = deserializeBucket(path);
+			for(int j = 0 ; j < buckets.size() ; j++)
+			{
+				for(int k = 0 ; k < buckets.get(j).size() ; k++){
 
+					String pagePath = buckets.get(j).get(k);
+					Vector<Tuple> tuples = deserialize(pagePath);
 
+					for(int indexOfTuple = 0 ; indexOfTuple < tuples.size() ; indexOfTuple++)
+					{
+						Tuple tupleInHand = tuples.get(indexOfTuple);
+						Object valueOfTuple = tupleInHand.data.get(tupleInHand.clusteringKey);
+
+						//el tuple howa ely f eedy
+
+						if(comparison(valueOfTuple, value) == 0)
+							searchLayersResult = pagePath;
+
+						//el tuple as8ar mn ely f eedy
+						if(comparison(valueOfTuple, value) < 0)
+						{
+							if(maxBeforeValue == null){
+								maxBeforeValue = valueOfTuple;
+								maxBeforeValuePath = pagePath;
+							}
+
+							else if(comparison(valueOfTuple, maxBeforeValue) > 0)
+							{
+								maxBeforeValue = valueOfTuple;
+								maxBeforeValuePath = pagePath;
+							}
+						}
+
+						//el tuple akbar mn ely f eedy
+						else
+						{
+							if(minAfterValue == null)
+							{
+								minAfterValue = valueOfTuple;
+								minAfterValuePath = pagePath;
+							}
+							else if(comparison(valueOfTuple, minAfterValue) < 0){
+								minAfterValue = valueOfTuple;
+								minAfterValuePath = pagePath;
+							}
+						}
+					}
+				}
+				//}
+			}
+
+			searchLayersResult = maxBeforeValuePath;
+		}
+		else
+			for(Object arr : (Object[])grid1)
+				searchLayers(arr, value, dimension-1, table);
+		return searchLayersResult;
+	}
 	public String searchBucket(String bucketPath, Tuple tuple, Table table) {
 		Vector<Tuple> firstPage = deserialize(table.pagesPath.get(0));
 		Vector<Tuple> lastPage = deserialize(table.pagesPath.get(table.pagesPath.size()-1));
@@ -994,7 +1212,6 @@ public class DBApp implements DBAppInterface, Serializable {
 //		System.out.println(tuple);
 		return maxBeforeValuePath;
 	}
-
 	@Override
 	public void deleteFromTable(String tableName, Hashtable<String, Object> columnNameValue) throws DBAppException {
 		// id, 7
@@ -1053,6 +1270,12 @@ public class DBApp implements DBAppInterface, Serializable {
 				String bucketPath = (String) grid[index];
 				pagePath = searchBucket(bucketPath, tuple, table);
 			}
+			else
+			{
+				Object[] toBeSearched = (Object[]) grid[index];
+				prepareForSearch();
+				pagePath = searchLayers(toBeSearched, (Object) tuple,dimension,table);
+			}
 			if(pagePath.equals(""))
 			{
 				System.out.println("This primary key is not present in the table");
@@ -1084,7 +1307,14 @@ public class DBApp implements DBAppInterface, Serializable {
 		{
 			Vector<Tuple> page;
 			int pageIndex = searchForPage(table, tuple);  // searching for the index
-			pagePath= table.pagesPath.get(pageIndex);
+			try{
+				pagePath= table.pagesPath.get(pageIndex);
+			}
+			catch (ArrayIndexOutOfBoundsException exception)
+			{
+				System.out.println("This primary key is not present in the table");
+				return;
+			}
 			page = deserialize(pagePath);
 			int indexInPage = searchInPage(page, tuple);
 
@@ -1280,7 +1510,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 
 	}
-
 	public SQLTerm[] makeMySqlTerms(String tableName, Hashtable<String, Object> columnNameValue) {
 		Vector<SQLTerm> v = new Vector<>();
 		for(String key: columnNameValue.keySet())
@@ -1353,7 +1582,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 
 	}
-
 	@Override
 	public Iterator <?> selectFromTable(SQLTerm[] sqlTerms, String[] arrayOperators) throws DBAppException {
 		// TODO Auto-generated method stub
@@ -1395,9 +1623,13 @@ public class DBApp implements DBAppInterface, Serializable {
 				tuple.data.put(table.clusteringKey, primaryKeyCondition._objValue); // adding the value of the primary key to the tuple
 				//search for this tuple
 				int pageIndexInTable = searchForPage(table, tuple);  // searching for the index of the page
+				if(pageIndexInTable==-1)
+					pageIndexInTable=0;
 				String pagePrimaryKeyPath= table.pagesPath.get(pageIndexInTable);
 				pagePrimaryKey = deserialize(pagePrimaryKeyPath); //page containing the primary key
 				int indexInPage = searchInPage(pagePrimaryKey, tuple); //the index of the required tuple in the page
+				if(indexInPage==-1)
+					indexInPage=0;
 				Tuple primaryKeyTuple = pagePrimaryKey.get(indexInPage);//the tuple containing the primary key
 				//Now, apply condition on only the primary key
 				Object primaryKeyValue = primaryKeyCondition._objValue;
@@ -1536,9 +1768,7 @@ public class DBApp implements DBAppInterface, Serializable {
 			return finalResult.iterator();
 		}
 	}
-
-	public static void loopALLPrimaryKey(SQLTerm primaryKeyCondition, Table table, int pageIndexInTable, int indexInPage, SQLTerm[] sqlTerms, HashSet<Tuple> result, String[] arrayOperators, Vector<Object> resultPrimaryKeyValue )
-	{
+	public static void loopALLPrimaryKey(SQLTerm primaryKeyCondition, Table table, int pageIndexInTable, int indexInPage, SQLTerm[] sqlTerms, HashSet<Tuple> result, String[] arrayOperators, Vector<Object> resultPrimaryKeyValue ){
 		Vector<Tuple> pagePrimaryKey = deserialize(table.pagesPath.get(pageIndexInTable));
 		Tuple primaryKeyTuple = pagePrimaryKey.get(indexInPage);
 		switch (primaryKeyCondition._strOperator)
@@ -1878,8 +2108,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 	}
 
-	public static void loopPrimaryKey(SQLTerm primaryKeyCondition, Table table, int pageIndexInTable, Vector<Tuple> pagePrimaryKey, int indexInPage, SQLTerm[] sqlTerms, HashSet<Tuple> result, Tuple primaryKeyTuple)
-	{
+	public static void loopPrimaryKey(SQLTerm primaryKeyCondition, Table table, int pageIndexInTable, Vector<Tuple> pagePrimaryKey, int indexInPage, SQLTerm[] sqlTerms, HashSet<Tuple> result, Tuple primaryKeyTuple){
 		switch (primaryKeyCondition._strOperator)
 		{
 			case ">":
@@ -2229,12 +2458,9 @@ public class DBApp implements DBAppInterface, Serializable {
 				System.out.println("Operator not valid");
 		}
 	}
-
-
 	//////////////////////////
 	// to get the buckets of each statment
-	public static HashSet <String> getAllFilteredBuckets(Vector<String>maxIndexColumnsNames, SQLTerm[] sqlTerms,String[] arrayOperators, Object[] maxIndex, Table table)
-	{
+	public static HashSet <String> getAllFilteredBuckets(Vector<String>maxIndexColumnsNames, SQLTerm[] sqlTerms,String[] arrayOperators, Object[] maxIndex, Table table){
 		HashSet<String> filteredBuckets=null;
 		Stack<Object> stack = new Stack<>();
 		stack.add(sqlTerms[0]);
@@ -2255,7 +2481,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		xorKiller(stack);
 		return (HashSet<String>) stack.pop();
 	}
-
 	public static Stack<Object> orKiller(Stack<Object> stack){
 		Stack<Object> res = new Stack<>();
 
@@ -2279,7 +2504,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return res;
 	}
-
 	public static void xorKiller(Stack<Object> stack){
 
 		while (!stack.isEmpty()){
@@ -2300,7 +2524,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 
 	}
-
 	public static HashSet<String> xor(HashSet<String> set1, HashSet<String> set2){
 		HashSet<String> res = new HashSet<>();
 		for(String string : set1){
@@ -2314,7 +2537,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return res;
 	}
-
 	public static void evaluateStack(Stack<Object> stack, Vector<String>maxIndexColumnsNames, String[] arrayOperators, Object[] maxIndex, Table table){
 
 //		System.out.println("Stack : " + stack);
@@ -2338,9 +2560,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		HashSet<String> filteredBucktes = getFilteredBucktes(layersSqlTerms,maxIndex,maxIndexColumnsNames, table);
 		stack.push(filteredBucktes);
 	}
-
-	public static Vector<SQLTerm>[] getTheLayersSqlTerms(Vector<String> maxIndexColumnsNames, SQLTerm[] sqlTerms)
-	{
+	public static Vector<SQLTerm>[] getTheLayersSqlTerms(Vector<String> maxIndexColumnsNames, SQLTerm[] sqlTerms){
 		//use this index that we found
 		//for each layer of the index, specify which sqlTerm is applied on it
 		//ex: index layers: [gpa, id] []
@@ -2366,9 +2586,7 @@ public class DBApp implements DBAppInterface, Serializable {
 
 		return layersSqlTerms;
 	}
-
-	public static HashSet<Tuple> queryAllBuckets(Table table,SQLTerm[] sqlTerms, String[] arrayOperators, HashSet<String> filteredBuckets)
-	{
+	public static HashSet<Tuple> queryAllBuckets(Table table,SQLTerm[] sqlTerms, String[] arrayOperators, HashSet<String> filteredBuckets){
 		HashSet<Tuple> result = new HashSet<>();
 		HashSet<String> pages = new HashSet<>();
 		for(String s : filteredBuckets) //looping on the vector of buckets
@@ -2430,7 +2648,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return result;
 	}
-
 	public static HashSet<Tuple> queryAllTheTable(Table table,SQLTerm[] sqlTerms, String[] arrayOperators){
 		HashSet<Tuple> result = new HashSet<>();
 		//loop on the table
@@ -2479,7 +2696,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return result;
 	}
-
 	public static boolean conditionsResult(Vector<Boolean>conditionsSatisfied, String[]arrayOperators){
 		//[true,false,true] [OR,AND] [true, OR, false,
 		//order operators on an array based on priority
@@ -2539,9 +2755,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		//finally the vector will contain only one boolean value containing the result
 		return (Boolean) conditionsResult.get(0);
 	}
-
-	public static HashSet<String> getFilteredBucktes(Vector<SQLTerm>[] layersSqlTerms, Object[] gridLayer, Vector<String> indexColumnNames, Table table)
-	{
+	public static HashSet<String> getFilteredBucktes(Vector<SQLTerm>[] layersSqlTerms, Object[] gridLayer, Vector<String> indexColumnNames, Table table){
 		Vector<Vector<Integer>> layerIndiciesNeeded = new Vector();
 		HashSet<String> result= new HashSet<>();
 		for(int i=0; i<indexColumnNames.size(); i++)
@@ -2673,8 +2887,7 @@ public class DBApp implements DBAppInterface, Serializable {
 
 
 	}
-	public static HashSet<String> getFilteredBucktesHelper( Object[] gridLayer, Vector<String> indexColumnNames, int grid, Vector<Vector<Integer>> eachBucketNeededOnEveryLayer)
-	{
+	public static HashSet<String> getFilteredBucktesHelper( Object[] gridLayer, Vector<String> indexColumnNames, int grid, Vector<Vector<Integer>> eachBucketNeededOnEveryLayer){
 		HashSet<String> result = new HashSet<>();
 		//base case: (I'm in the last layer) just return what bucket on the gridLayer
 		if(grid==indexColumnNames.size()-1)
@@ -2696,7 +2909,6 @@ public class DBApp implements DBAppInterface, Serializable {
 		}
 		return result;
 	}
-
 	public static void serialize(String path, Vector<Tuple> page) {
 		try {
 			FileOutputStream fileOut = new FileOutputStream(path);
@@ -2708,8 +2920,6 @@ public class DBApp implements DBAppInterface, Serializable {
 			i.printStackTrace();
 		}
 	}
-
-
 	public static Vector<Tuple> deserialize(String path) {
 
 		Vector<Tuple> page = new Vector<Tuple>();
@@ -2766,13 +2976,106 @@ public class DBApp implements DBAppInterface, Serializable {
 			i.printStackTrace();
 		}
 	}
+	public Iterator parseSQL( StringBuffer strbufSQL ) throws
+			DBAppException{
+		// Before looking at this method ,Look at Mylistener.java file as it is subclass of MySqlParserBaseListener.java
+		// in Mylistener.java you will find instance variables I called here and methods of entering grammar rules I implemented that overrides the super class MySqlParserBaseListener.java
+		//If you will call this method,You have to disable scala plugin that it is added lately in intellij ,for that go to file->settings->plugins->(search for scala and disable it)
+		MySqlLexer mySqlLexer = new MySqlLexer(CharStreams.fromString(strbufSQL.toString()));
+		CommonTokenStream tokens = new CommonTokenStream(mySqlLexer);
+		MySqlParser mySqlParser = new MySqlParser(tokens);
+		ParseTree tree = mySqlParser.sqlStatement();
+		ParseTreeWalker walker = new ParseTreeWalker();
+		MyListener listener=new MyListener();
+		ParseTreeWalker.DEFAULT.walk(listener, tree);
+
+		Hashtable<String, Object> colNameVal=new Hashtable<>();
+		String theTable="";
+		String cluster="";
+
+		switch(MyListener.statement)
+		{
+			case "select":
+				colNameVal=new Hashtable<>();
+				int sizeOfArray=MyListener.term.size();
+				SQLTerm[] sqltermsArray = new SQLTerm[sizeOfArray];
+				for(int i=0;i<sizeOfArray;i++){
+					sqltermsArray[i]=MyListener.term.get(i);
+
+				}
+				int sizeOfOperators=MyListener.operators.size();
+				String[] logicalOperators=new String[sizeOfOperators];
+				for(int j=0;j<sizeOfOperators;j++){
+					logicalOperators[j]=MyListener.operators.get(j);
+
+				}
+				//DBAPP select method here
+                return this.selectFromTable(sqltermsArray,logicalOperators);
+
+			case "delete":
+
+				for(int i=0;i<MyListener.term.size();i++)
+				{
+					colNameVal.put(MyListener.term.get(i)._strColumnName,(MyListener.term.get(i)._objValue));
+
+				}
+				theTable=MyListener.tableName;
+				this.deleteFromTable(theTable,colNameVal);
+				break;
+			case "insert":
+				colNameVal=new Hashtable<>();
+				theTable=MyListener.tableName;
+				for(int i=0;i<MyListener.columns.size();i++)
+				{
+					Object vv=MyListener.getObj(theTable,MyListener.columns.get(i),MyListener.values.get(i));
+					colNameVal.put(MyListener.columns.get(i),vv);
+
+				}
+               this.insertIntoTable(theTable,colNameVal);
+				break;
+
+			case "update":
+				colNameVal=new Hashtable<>();
+				theTable=MyListener.tableName;
+				for(int i=0;i<MyListener.columns.size();i++)
+				{ Object vv=MyListener.getObj(theTable,MyListener.columns.get(i),MyListener.values.get(i));
+					colNameVal.put(MyListener.columns.get(i),vv);
+					}
+				for(int i=0;i<MyListener.term.size();i++)
+				{
+					cluster=(MyListener.term.get(i)._objValue).toString();
+				}
+
+              this.updateTable(theTable,cluster,colNameVal);
+
+				break;
+			case "createIndex":
+				theTable=MyListener.tableName;
+
+				int arraySize=MyListener.columns.size();
+				String[] col = new String[arraySize];
+				for(int i=0;i<arraySize;i++){
+					col[i]=MyListener.columns.get(i);
+				}
+               this.createIndex(theTable,col);
+
+				break;
+			case "createTable" :
+				theTable=MyListener.tableName;
+
+				this.createTable(theTable,MyListener.clustering,MyListener.colNameTypes,MyListener.minColumnValues,MyListener.maxColumnValues);
+
+            break;
+
+		}
 
 
+                return null;
+	}
 	public static void main(String[] args) throws DBAppException, IOException, ParseException {
 		DBApp dbApp = new DBApp();
 		dbApp.init();
 		String tableName = "students";
-
 		Hashtable<String, String> htblColNameType = new Hashtable<String, String>();
 		htblColNameType.put("id", "java.lang.String");
 		htblColNameType.put("first_name", "java.lang.String");
@@ -2802,7 +3105,7 @@ public class DBApp implements DBAppInterface, Serializable {
 		int c = 10;
 
 		Hashtable<String, Object> row = new Hashtable<>();
-		while ((record = studentsTable.readLine()) != null && c > 0) {
+		while (c > 0 && (record = studentsTable.readLine()) != null) {
 			String[] fields = record.split(",");
 
 			row.put("id", fields[0]);
@@ -2824,12 +3127,23 @@ public class DBApp implements DBAppInterface, Serializable {
 			row.clear();
 			c--;
 		}
-		studentsTable.close();
-		String[] column = new String[1];
-		column[0]="id";
-//		column[1]="gpa";
+		//studentsTable.close();
+		String[] column = new String[2];
+		column[0]="first_name";
+		column[1]="gpa";
 		dbApp.createIndex("students",column);
 		Object[] grid = table.indices.get(0);
+
+		String[] column2 = new String[1];
+		column2[0]="id";
+//		column2[1]="gpa";
+		//dbApp.createIndex("students",column2);
+
+
+
+		//dbApp.parseSQL(sql);
+
+
 //
 
 
@@ -2866,92 +3180,168 @@ public class DBApp implements DBAppInterface, Serializable {
 //		System.out.println("Iterator: " + count);
 
 
-		for(int j=0; j<10; j++) {
-			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
-			System.out.println(table.ranges.get("id")[j]);
-			for (int l = 0; l < pagesPath.size(); l++) {
-				for (int k = 0; k < pagesPath.get(l).size(); k++) {
-					System.out.println(deserialize(pagesPath.get(l).get(k)));
-				}
-				System.out.println("/////////////////////");
-			}
-		}
+//		for(int j=0; j<10; j++) {
+//			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
+//			System.out.println(table.ranges.get("id")[j]);
+//			for (int l = 0; l < pagesPath.size(); l++) {
+//				for (int k = 0; k < pagesPath.get(l).size(); k++) {
+//					System.out.println(deserialize(pagesPath.get(l).get(k)));
+//				}
+//				System.out.println("/////////////////////");
+//			}
+//		}
 //		Hashtable<String, Object> toBeUpdated = new Hashtable<>();
 //		toBeUpdated.put("gpa", new Double(0.88));
 
+
+		Hashtable<String,Object> toBeUpdated = new Hashtable<>();
+		toBeUpdated.put("first_name",new String("FFFFFF"));
+		toBeUpdated.put("last_name", new String("khal"));
+		toBeUpdated.put("gpa", new Double(0.88));
+
 		Hashtable<String,Object> toBeDeleted = new Hashtable<>();
-		toBeDeleted.put("id", "82-8772");
+		toBeDeleted.put("id", new String("82-8772"));
 
-
-//		for(int i=0;i<10;i++)
-//		{
-//			Arrays.toString(grid);
-//			Object[] secondLayer =  (Object[]) grid[i];
-//			for(int j=0; j<10; j++) {
-//				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
-//				System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
-//				for (int l = 0; l < pagesPath.size(); l++) {
-//					for (int k = 0; k < pagesPath.get(l).size(); k++) {
-//						System.out.println(deserialize(pagesPath.get(l).get(k)));
-//					}
-//					System.out.println("/////////////////////");
-//				}
-//			}
-//		}
-//
-//		for(int i=0;i<table.pagesPath.size();i++)
-//		{
-//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-//			for(int j=0;j<page.size();j++)
-//			{
-//				System.out.println(page.get(j));
-//			}
-//			System.out.println("ana page");
-//		}
-//
-		System.out.println("************************************************************************************************8");
-
-//		dbApp.updateTable("students","82-8772", toBeUpdated);
-		dbApp.deleteFromTable("students",toBeDeleted);
-
-		for(int j=0; j<10; j++) {
-			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
-			System.out.println(table.ranges.get("id")[j]);
-			for (int l = 0; l < pagesPath.size(); l++) {
-				for (int k = 0; k < pagesPath.get(l).size(); k++) {
-					System.out.println(deserialize(pagesPath.get(l).get(k)));
+		for(int i=0;i<10;i++)
+		{
+			Arrays.toString(grid);
+			Object[] secondLayer =  (Object[]) grid[i];
+			for(int j=0; j<10; j++) {
+				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
+				//System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
+				for (int l = 0; l < pagesPath.size(); l++) {
+					for (int k = 0; k < pagesPath.get(l).size(); k++) {
+						//System.out.println(deserialize(pagesPath.get(l).get(k)));
+					}
+					//System.out.println("/////////////////////");
 				}
-				System.out.println("/////////////////////");
 			}
 		}
 
-//		for(int i=0;i<table.pagesPath.size();i++)
-//		{
-//			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
-//			for(int j=0;j<page.size();j++)
-//			{
-//				System.out.println(page.get(j));
-//			}
-//			System.out.println("ana page");
+		for(int i=0;i<table.pagesPath.size();i++)
+		{
+			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+			for(int j=0;j<page.size();j++)
+			{
+				System.out.println(page.get(j));
+			}
+			System.out.println("ana page");
+		}
+
+		System.out.println("************************************************************************************************8");
+
+
+
+		//dbApp.parseSQL(new StringBuffer("CREATE TABLE hotel(age INT CHECK (age BETWEEN 5 AND 16) PRIMARY KEY ,id VARCHAR(50) CHECK (id BETWEEN '46-1848' AND '46-5404'),name VARCHAR(50) CHECK (name BETWEEN 'AAAA' AND 'zzzz'), money INT CHECK (money BETWEEN 15 AND 76), mydate date CHECK (mydate BETWEEN '1910-10-25' AND '1990-10-25'))"));
+		//dbApp.parseSQL(new StringBuffer("create index theindex on hotel(age,id)"));
+		//dbApp.parseSQL(new StringBuffer("delete from students where id='82-8772'"));
+		//dbApp.parseSQL(new StringBuffer("insert into students(id,gpa,dob,first_name,last_name) values('95-5555','0.9','1995-11-25','AHMED','sobeih') "));
+		//dbApp.parseSQL(new StringBuffer("UPDATE students set first_name='marwan' where id='67-5025'"));
+		//dbApp.parseSQL(new StringBuffer("delete from students where id='67-5025'"));
+		/*Iterator itr = dbApp.parseSQL(new StringBuffer("select * from students where id>'59-8196' OR id<'52-2476'"));
+		while(itr.hasNext()) {
+			Object element = itr.next();
+			System.out.println(element + " ");
+	}*/
+
+		dbApp.updateTable("students","82-8772", toBeUpdated);
+		//dbApp.deleteFromTable("students",toBeDeleted);
+		//dbApp.deleteFromTable("students",toBeDeleted);
+		//dbApp.deleteFromTable("students",toBeDeleted);
+		dbApp.updateTable("students","52-2476", toBeUpdated);
+		Hashtable<String, Object> toBeDeleted2 = new Hashtable<>();
+		//toBeDeleted2.put("first_name", new String("DVLYsf"));
+		//dbApp.deleteFromTable("students",toBeDeleted2);
+
+		Hashtable<String,Object> toBeInserted = new Hashtable<>();
+		toBeInserted.put("id", new String("90-5425"));
+		toBeInserted.put("first_name", "YQigxr");
+		toBeInserted.put("last_name", "mIBWZv");
+
+		Date dob = new Date(2000-1900, 01-1, 31);
+		toBeInserted.put("dob", dob);
+
+		double gpa = 3.63;
+
+		toBeInserted.put("gpa", gpa);
+
+		dbApp.insertIntoTable("students", toBeInserted);
+
+		//UPDAAAAAAAAAAAAATE
+
+		Hashtable<String,Object> toBeUpdated2 = new Hashtable<>();
+		toBeUpdated2.put("first_name",new String("VVVVV"));
+		toBeUpdated2.put("last_name", new String("khal"));
+		toBeUpdated2.put("gpa", new Double(0.88));
+		dbApp.updateTable("students","90-5425", toBeUpdated2);
+
+//		c = 10;
+//		while (c > 0 && (record = studentsTable.readLine()) != null) {
+//			String[] fields = record.split(",");
+
+//			row.put("id", fields[0]);
+//			row.put("first_name", fields[1]);
+//			row.put("last_name", fields[2]);
+//
+//			int year = Integer.parseInt(fields[3].trim().substring(0, 4));
+//			int month = Integer.parseInt(fields[3].trim().substring(5, 7));
+//			int day = Integer.parseInt(fields[3].trim().substring(8));
+//
+//			Date dob = new Date(year - 1900, month - 1, day);
+//			row.put("dob", dob);
+//
+//			double gpa = Double.parseDouble(fields[4].trim());
+//
+//			row.put("gpa", gpa);
+//
+//			dbApp.insertIntoTable("students", row);
+//			row.clear();
+//			c--;
 //		}
-//
-//
-//
-//		for(int i=0;i<10;i++)
-//		{
-//			Arrays.toString(grid);
-//			Object[] secondLayer =  (Object[]) grid[i];
-//			for(int j=0; j<10; j++) {
-//				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
-//				System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
-//				for (int l = 0; l < pagesPath.size(); l++) {
-//					for (int k = 0; k < pagesPath.get(l).size(); k++) {
-//						System.out.println(deserialize(pagesPath.get(l).get(k)));
-//					}
-//					System.out.println("/////////////////////");
+
+
+
+
+		for(int i=0;i<table.pagesPath.size();i++)
+		{
+			Vector<Tuple> page = deserialize(table.pagesPath.get(i));
+			for(int j=0;j<page.size();j++)
+			{
+				System.out.println(page.get(j));
+			}
+			System.out.println("ana page");
+		}
+
+//		for(int j=0; j<10; j++) {
+//			Vector<Vector<String>> pagesPath = deserializeBucket((String) (grid[j]));
+//			System.out.println(table.ranges.get("id")[j]);
+//			for (int l = 0; l < pagesPath.size(); l++) {
+//				for (int k = 0; k < pagesPath.get(l).size(); k++) {
+//					System.out.println(deserialize(pagesPath.get(l).get(k)));
 //				}
+//				System.out.println("/////////////////////");
 //			}
 //		}
+
+
+		for(int i=0;i<10;i++)
+		{
+			Arrays.toString(grid);
+			Object[] secondLayer =  (Object[]) grid[i];
+			for(int j=0; j<10; j++) {
+				Vector<Vector<String>> pagesPath = deserializeBucket((String) (secondLayer[j]));
+				//System.out.println(table.ranges.get("first_name")[i] + " " + table.ranges.get("gpa")[j]);
+				for (int l = 0; l < pagesPath.size(); l++) {
+					for (int k = 0; k < pagesPath.get(l).size(); k++) {
+					//	System.out.println(deserialize(pagesPath.get(l).get(k)));
+					}
+					//System.out.println("/////////////////////");
+				}
+			}
+		}
+
 	}
 }
+
+
 

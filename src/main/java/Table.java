@@ -137,6 +137,7 @@ public class Table {
 
 	}
 	public static Pair[] generateRangesForStrings(String min, String max){
+		System.out.println("entered");
 		char m = max.charAt(max.length()-1);
 		char n = min.charAt(min.length()-1);
 		String remainingSimilar = min.substring(0,min.length()-1);
@@ -146,7 +147,12 @@ public class Table {
 		char y=n;
 		double rangeStep = ((int)m-(int)x)/(10.0);
 		if(rangeStep<1)
+		{
+			System.out.println(j);
 			j = (int)(rangeStep*10)-1;
+			System.out.println(j);
+		}
+
 		for(int i=0; i<=j-1; i++){//n  q
 			rangeStep = ((int)m-(int)x)/(10-i);
 			if(rangeStep==0)
@@ -160,7 +166,9 @@ public class Table {
 		String rangeMin = remainingSimilar + x;
 		y = (char) (x + rangeStep+1);
 		String rangeMax = remainingSimilar + y;
+		System.out.println(j);
 		ranges[j]=new Pair(rangeMin,rangeMax);
+
 		return ranges;
 	}
 	public static int firstDifferentChar(String min, String max){
